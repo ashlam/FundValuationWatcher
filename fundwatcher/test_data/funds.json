@@ -1,0 +1,178 @@
+[
+    {
+        "fund_name": "招商量化精选股票C",
+        "amount": 4945.27,
+        "earnings_yesterday": -65.19,
+        "total_earnings": 235.27,
+        "return_rate": 5.00,
+        "notes": "定投"
+    },
+    {
+        "fund_name": "招商中证电池主题ETF联接C",
+        "amount": 24103.64,
+        "earnings_yesterday": -639.23,
+        "total_earnings": -265.07,
+        "return_rate": -1.09,
+        "notes": ""
+    },
+    {
+        "fund_name": "国泰CES半导体芯片行业ETF联接C",
+        "amount": 21707.72,
+        "earnings_yesterday": -225.32,
+        "total_earnings": -1546.48,
+        "return_rate": -6.65,
+        "notes": "金选 指数基金"
+    },
+    {
+        "fund_name": "国泰中证全指通信设备ETF联接A",
+        "amount": 29583.47,
+        "earnings_yesterday": -678.65,
+        "total_earnings": 107.39,
+        "return_rate": 0.36,
+        "notes": ""
+    },
+    {
+        "fund_name": "国泰黄金ETF联接A",
+        "amount": 15172.55,
+        "earnings_yesterday": -453.69,
+        "total_earnings": 2268.30,
+        "return_rate": 17.58,
+        "notes": "金选 指数基金"
+    },
+    {
+        "fund_name": "国泰北证50成份指数C",
+        "amount": 10431.30,
+        "earnings_yesterday": -204.78,
+        "total_earnings": 431.30,
+        "return_rate": 4.31,
+        "notes": ""
+    },
+    {
+        "fund_name": "广发中证军工ETF联接C",
+        "amount": 32509.82,
+        "earnings_yesterday": -392.55,
+        "total_earnings": -1463.33,
+        "return_rate": -4.31,
+        "notes": "金选 指数基金"
+    },
+    {
+        "fund_name": "易方达软件服务ETF联接C",
+        "amount": 9351.93,
+        "earnings_yesterday": -134.38,
+        "total_earnings": -648.07,
+        "return_rate": -6.48,
+        "notes": ""
+    },
+    {
+        "fund_name": "易方达恒生红利低波联接C",
+        "amount": 10.25,
+        "earnings_yesterday": 0.02,
+        "total_earnings": 0.42,
+        "return_rate": 4.16,
+        "notes": "金选 指数基金"
+    },
+    {
+        "fund_name": "易方达科创50联接C",
+        "amount": 1.08,
+        "earnings_yesterday": -0.01,
+        "total_earnings": 0.00,
+        "return_rate": -0.40,
+        "notes": "金选 指数基金"
+    },
+    {
+        "fund_name": "易方达恒生科技ETF联接(QDII)C",
+        "amount": 1.38,
+        "earnings_yesterday": 0.01,
+        "total_earnings": -0.19,
+        "return_rate": -12.00,
+        "notes": "金选 指数基金"
+    },
+    {
+        "fund_name": "易方达储能电池ETF联接C",
+        "amount": 10.72,
+        "earnings_yesterday": -0.38,
+        "total_earnings": 0.72,
+        "return_rate": 7.18,
+        "notes": ""
+    },
+    {
+        "fund_name": "易方达证券ETF联接C",
+        "amount": 9.55,
+        "earnings_yesterday": 0.03,
+        "total_earnings": -0.45,
+        "return_rate": -4.48,
+        "notes": ""
+    },
+    {
+        "fund_name": "天弘中证全指证券公司ETF联接C",
+        "amount": 9.30,
+        "earnings_yesterday": 0.03,
+        "total_earnings": -0.44,
+        "return_rate": -4.50,
+        "notes": "金选 指数基金"
+    },
+    {
+        "fund_name": "天弘中证银行ETF联接C",
+        "amount": 16.93,
+        "earnings_yesterday": 0.26,
+        "total_earnings": -0.31,
+        "return_rate": -1.78,
+        "notes": "金选 指数基金"
+    },
+    {
+        "fund_name": "天弘沪深300ETF联接C",
+        "amount": 10.80,
+        "earnings_yesterday": -0.06,
+        "total_earnings": 0.41,
+        "return_rate": 3.93,
+        "notes": ""
+    },
+    {
+        "fund_name": "景顺长城景颐招利6个月持有期债券A",
+        "amount": 10039.05,
+        "earnings_yesterday": -34.14,
+        "total_earnings": 39.05,
+        "return_rate": 0.39,
+        "notes": "金选 固收+"
+    },
+    {
+        "fund_name": "鹏华中证中药ETF联接A",
+        "amount": 10064.60,
+        "earnings_yesterday": 105.38,
+        "total_earnings": 64.60,
+        "return_rate": 0.65,
+        "notes": "金选 指数基金"
+    },
+    {
+        "fund_name": "华夏有色金属ETF联接C",
+        "amount": 14590.02,
+        "earnings_yesterday": -697.24,
+        "total_earnings": -79.44,
+        "return_rate": -0.54,
+        "notes": "金选 指数基金"
+    },
+    {
+        "fund_name": "华夏中证机器人ETF联接A",
+        "amount": 30831.53,
+        "earnings_yesterday": -463.45,
+        "total_earnings": 700.89,
+        "return_rate": 2.33,
+        "notes": "金选 指数基金"
+    },
+    {
+        "fund_name": "华夏中证动漫游戏ETF联接C",
+        "amount": 9.37,
+        "earnings_yesterday": 0.02,
+        "total_earnings": -0.63,
+        "return_rate": -6.25,
+        "notes": "金选 指数基金"
+    },
+    {
+        "fund_name": "嘉实中证稀土产业ETF联接C",
+        "amount": 31186.35,
+        "earnings_yesterday": -1337.10,
+        "total_earnings": 1184.14,
+        "return_rate": 3.95,
+        "notes": "金选 指数基金"
+    }
+]
