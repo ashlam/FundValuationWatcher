@@ -25,6 +25,9 @@ table{width:100%;border-collapse:collapse;margin-top:12px;color:#666}
 th,td{border-bottom:1px solid #eee;padding:8px;text-align:left;font-size:14px}
 .pos{color:#d93025}
 .neg{color:#0b8f2d}
+.navts{color:#1a73e8}
+.pbtn{padding:2px 6px;border:1px solid #ddd;background:#fff;color:#666;border-radius:999px;font-size:12px;margin-left:6px}
+.pbtn.on{border-color:#1a73e8;color:#1a73e8}
 .muted{color:#888}
 .nav{display:flex;gap:12px;padding:8px 0;border-bottom:1px solid #eee;margin-bottom:12px}
 .nav a{color:#1a73e8;text-decoration:none}
@@ -56,10 +59,11 @@ th,td{border-bottom:1px solid #eee;padding:8px;text-align:left;font-size:14px}
 <thead><tr>
 <th data-key="fundcode">代码</th>
 <th data-key="name">名称</th>
-<th data-key="amount">持有金额</th>
-<th data-key="profit">当日盈亏（金额）</th>
-<th data-key="gsz">估算净值</th>
+<th data-key="amount">持有金额 <button id="toggleAmt" class="pbtn" type="button">隐私</button></th>
 <th data-key="gszzl">估算涨跌幅</th>
+<th data-key="profit">当日盈亏（金额）</th>
+<th data-key="total_earnings">持有收益金额 <button id="toggleTe" class="pbtn" type="button">隐私</button></th>
+<th data-key="return_rate">持有收益率</th>
 <th data-key="jzrq">净值日期</th>
 <th data-key="gztime">更新时间</th>
 </tr></thead>
@@ -76,9 +80,32 @@ const sumProfitEl=document.getElementById("sumProfit")
 const fmt=v=>v===undefined||v===null?"":v
 let portfolioMap={}
 let refreshTimer=null
+let refreshTimeout=null
 let lastItems=[]
 let sortKey=null
 let sortAsc=true
+let hideAmount=false
+let hideTotalEarnings=false
+const toggleAmtBtn=document.getElementById("toggleAmt")
+const toggleTeBtn=document.getElementById("toggleTe")
+if(toggleAmtBtn){
+  toggleAmtBtn.addEventListener("click", (e)=>{
+    if(e){ e.stopPropagation() }
+    hideAmount=!hideAmount
+    toggleAmtBtn.className="pbtn"+(hideAmount?" on":"")
+    toggleAmtBtn.textContent=hideAmount?"显示":"隐私"
+    render(lastItems)
+  })
+}
+if(toggleTeBtn){
+  toggleTeBtn.addEventListener("click", (e)=>{
+    if(e){ e.stopPropagation() }
+    hideTotalEarnings=!hideTotalEarnings
+    toggleTeBtn.className="pbtn"+(hideTotalEarnings?" on":"")
+    toggleTeBtn.textContent=hideTotalEarnings?"显示":"隐私"
+    render(lastItems)
+  })
+}
 function isTradingHours(d=new Date()){
   const day=d.getDay()
   if(day===0||day===6) return false
@@ -96,7 +123,12 @@ async function initPortfolio(){
     for(const it of (j.items||[])){
       const c=(it.code||"").trim()
       const amt=Number(it.amount||0)
-      if(c){ portfolioMap[c]=amt }
+      const te=Number(it.total_earnings||0)
+      let rr=0
+      if(amt!==0){
+        rr=(te/amt)*100
+      }
+      if(c){ portfolioMap[c]={amount:amt, total_earnings:te, return_rate:rr} }
     }
   }catch(e){
     portfolioMap={}
@@ -110,12 +142,37 @@ async function initRefresh(){
     sec=Number(j.refresh_interval_seconds||55)
   }catch(e){}
   if(refreshTimer){ clearInterval(refreshTimer); refreshTimer=null }
+  if(refreshTimeout){ clearTimeout(refreshTimeout); refreshTimeout=null }
   if(isTradingHours()){
     const ms=Math.max(5000, sec*1000)
     if(autoRefreshDesc){ autoRefreshDesc.textContent=`每${sec}秒自动刷新` }
     refreshTimer=setInterval(load, ms)
   }else{
-    if(autoRefreshDesc){ autoRefreshDesc.textContent=`未开盘，自动刷新已暂停` }
+    const now=new Date()
+    const afterClose = (now.getHours()>18 || (now.getHours()===18 && now.getMinutes()>=0)) && now.getHours()<24
+    if(afterClose){
+      if(autoRefreshDesc){ autoRefreshDesc.textContent=`收盘后每30分钟自动刷新净值` }
+      const next=new Date(now)
+      next.setSeconds(0,0)
+      if(now.getMinutes()<30){
+        next.setMinutes(30)
+      }else{
+        next.setMinutes(0)
+        next.setHours(now.getHours()+1)
+      }
+      const delay=Math.max(1000, next.getTime()-now.getTime())
+      refreshTimeout=setTimeout(()=>{
+        load()
+        refreshTimer=setInterval(load, 30*60*1000)
+      }, delay)
+    }else{
+      if(autoRefreshDesc){ autoRefreshDesc.textContent=`未开盘，自动刷新已暂停` }
+      const today18=new Date(now)
+      today18.setHours(18,0,0,0)
+      if(today18.getTime()>now.getTime()){
+        refreshTimeout=setTimeout(initRefresh, Math.max(1000, today18.getTime()-now.getTime()))
+      }
+    }
   }
 }
 function render(items){
@@ -126,12 +183,15 @@ function render(items){
     lastItems.sort((a,b)=>{
       const cA=(a.fundcode||"").trim(), cB=(b.fundcode||"").trim()
       const pctOf=x=>((x.daily_pct!==undefined&&x.daily_pct!==null)?Number(x.daily_pct):Number(x.gszzl||0))
+      const diffOf=x=>((!isNaN(parseFloat(x.gsz))&&!isNaN(parseFloat(x.dwjz)))?(parseFloat(x.gsz)-parseFloat(x.dwjz)):-99999)
       const pctA=pctOf(a), pctB=pctOf(b)
-      const amtA=Number(portfolioMap[cA]||0), amtB=Number(portfolioMap[cB]||0)
+      const amtA=Number(portfolioMap[cA]?(portfolioMap[cA].amount||0):0), amtB=Number(portfolioMap[cB]?(portfolioMap[cB].amount||0):0)
       const profA=isFinite(amtA)&&isFinite(pctA)?(amtA*pctA/100):0
       const profB=isFinite(amtB)&&isFinite(pctB)?(amtB*pctB/100):0
-      const valA = key==="amount"?amtA : key==="profit"?profA : key==="gsz"?Number(a.gsz||0) : key==="gszzl"?pctA : key==="fundcode"?String(a.fundcode||"") : key==="name"?String(a.name||"") : key==="jzrq"?String(a.jzrq||"") : key==="gztime"?String(a.gztime||"") : ""
-      const valB = key==="amount"?amtB : key==="profit"?profB : key==="gsz"?Number(b.gsz||0) : key==="gszzl"?pctB : key==="fundcode"?String(b.fundcode||"") : key==="name"?String(b.name||"") : key==="jzrq"?String(b.jzrq||"") : key==="gztime"?String(b.gztime||"") : ""
+      const teA=Number(portfolioMap[cA]?(portfolioMap[cA].total_earnings||0):0), teB=Number(portfolioMap[cB]?(portfolioMap[cB].total_earnings||0):0)
+      const rrA=Number(portfolioMap[cA]?(portfolioMap[cA].return_rate||0):0), rrB=Number(portfolioMap[cB]?(portfolioMap[cB].return_rate||0):0)
+      const valA = key==="amount"?amtA : key==="profit"?profA : key==="total_earnings"?teA : key==="return_rate"?rrA : key==="gszzl"?pctA : key==="fundcode"?String(a.fundcode||"") : key==="name"?String(a.name||"") : key==="jzrq"?String(a.jzrq||"") : key==="gztime"?String(a.gztime||"") : ""
+      const valB = key==="amount"?amtB : key==="profit"?profB : key==="total_earnings"?teB : key==="return_rate"?rrB : key==="gszzl"?pctB : key==="fundcode"?String(b.fundcode||"") : key==="name"?String(b.name||"") : key==="jzrq"?String(b.jzrq||"") : key==="gztime"?String(b.gztime||"") : ""
       let cmp=0
       if(typeof valA==="number" && typeof valB==="number"){ cmp = (valA - valB) }
       else { cmp = String(valA).localeCompare(String(valB), "zh-CN", {numeric:true}) }
@@ -144,11 +204,23 @@ function render(items){
     const cls=pct>=0?"pos":"neg"
     const tr=document.createElement("tr")
     const c=(it.fundcode||"").trim()
-    const amt=Number(portfolioMap[c]||0)
+    const pItem = portfolioMap[c] || {}
+    const amt=Number(pItem.amount||0)
     const todayProfit=(isFinite(amt)&&isFinite(pct))?(amt*pct/100):0
     if(isFinite(amt)) sumAmt+=amt
-    if(isFinite(todayProfit)) sumProfit+=todayProfit
-    tr.innerHTML=`<td>${fmt(it.fundcode)}</td><td>${fmt(it.name)}</td><td>${amt?amt.toFixed(2):""}</td><td class="${todayProfit>=0?"pos":"neg"}">${amt?todayProfit.toFixed(2):""}</td><td>${fmt(it.gsz)}</td><td class="${cls}">${pct}%</td><td>${fmt(it.jzrq)}</td><td>${fmt(it.gztime)}</td>`
+  if(isFinite(todayProfit)) sumProfit+=todayProfit
+  
+  const te = Number(pItem.total_earnings), rr = Number(pItem.return_rate)
+  const teCls = (!hideTotalEarnings && isFinite(te)) ? (te>=0?"pos":"neg") : ""
+  const rrCls = isFinite(rr) ? (rr>=0?"pos":"neg") : ""
+  const teStr = isFinite(te) ? (te>=0?"+"+te.toFixed(2):te.toFixed(2)) : "-"
+  const rrStr = isFinite(rr) ? (rr>=0?"+"+rr.toFixed(2)+"%":rr.toFixed(2)+"%") : "-"
+
+  const amtStr = hideAmount ? "****" : (amt?amt.toFixed(2):"")
+  const teShow = hideTotalEarnings ? "****" : teStr
+  const timeStr = (it.pct_source==="official" && it.nav_fetched_at) ? fmt(it.nav_fetched_at) : fmt(it.gztime)
+  const timeCls = (it.pct_source==="official" && it.nav_fetched_at) ? "navts" : ""
+  tr.innerHTML=`<td>${fmt(it.fundcode)}</td><td>${fmt(it.name)}</td><td>${amtStr}</td><td class="${cls}">${pct}%</td><td class="${todayProfit>=0?"pos":"neg"}">${amt?todayProfit.toFixed(2):""}</td><td class="${teCls}">${teShow}</td><td class="${rrCls}">${rrStr}</td><td>${fmt(it.jzrq)}</td><td class="${timeCls}">${timeStr}</td>`
     tbody.appendChild(tr)
   }
   if(sumAmountEl) sumAmountEl.textContent = sumAmt ? sumAmt.toFixed(2) : "0.00"
@@ -193,7 +265,12 @@ loadMyBtn.addEventListener("click",async ()=>{
     for(const it of items){
       const c=(it.code||"").trim()
       const amt=Number(it.amount||0)
-      if(c){ portfolioMap[c]=amt }
+      const te=Number(it.total_earnings||0)
+      let rr=0
+      if(amt!==0){
+        rr=(te/amt)*100
+      }
+      if(c){ portfolioMap[c]={amount:amt, total_earnings:te, return_rate:rr} }
     }
     if(codes.length===0){
       alert("当前个人持仓没有基金代码，无法拉取估值。请在个人持仓页按基金代码新增，或导入包含 code 字段的 JSON。")
@@ -228,6 +305,8 @@ button{padding:8px 12px;border:1px solid #1a73e8;background:#1a73e8;color:#fff;b
 .preview img{max-width:160px;border:1px solid #eee;border-radius:6px}
 table{width:100%;border-collapse:collapse;margin-top:12px;color:#666}
 th,td{border-bottom:1px solid #eee;padding:8px;text-align:left;font-size:14px}
+.pos{color:#d93025}
+.neg{color:#0b8f2d}
 .nav{display:flex;gap:12px;padding:8px 0;border-bottom:1px solid #eee;margin-bottom:12px}
 .nav a{color:#1a73e8;text-decoration:none}
 .tabs{display:flex;gap:8px;border-bottom:1px solid #eee;margin-bottom:12px}
@@ -244,6 +323,9 @@ th,td{border-bottom:1px solid #eee;padding:8px;text-align:left;font-size:14px}
 <a href="/admin/funds">基金资料维护</a>
 </div>
 <div class="col">
+<div class="row">
+<button id="btnLoadMyPortfolio">我的持仓</button>
+</div>
 <div>
 <div class="tabs">
 <button id="tabJson" class="tab active">导入 JSON</button>
@@ -304,7 +386,7 @@ th,td{border-bottom:1px solid #eee;padding:8px;text-align:left;font-size:14px}
 <span class="muted" id="status"></span>
 </div>
 <table>
-<thead><tr><th>基金</th><th>金额</th><th>昨日收益</th><th>持有收益率(%)</th></tr></thead>
+<thead><tr><th>代码</th><th>基金</th><th>金额</th><th>昨日收益</th><th>持有收益</th></tr></thead>
 <tbody id="tbody"></tbody>
 </table>
 </div>
@@ -333,6 +415,10 @@ const importCsvFile=document.getElementById("importCsvFile")
 const addCode=document.getElementById("addCode")
 const addName=document.getElementById("addName")
 const addAmount=document.getElementById("addAmount")
+const btnLoadMyPortfolio=document.getElementById("btnLoadMyPortfolio")
+if(btnLoadMyPortfolio){
+  btnLoadMyPortfolio.addEventListener("click", loadList)
+}
 const addProfit=document.getElementById("addProfit")
 const addRate=document.getElementById("addRate")
 const addItem=document.getElementById("addItem")
@@ -341,7 +427,9 @@ function render(items){
   tbody.innerHTML=""
   for(const it of items||[]){
     const tr=document.createElement("tr")
-    tr.innerHTML=`<td>${it.fund_name||""}</td><td>${it.amount??""}</td><td>${it.earnings_yesterday??""}</td><td>${it.total_earnings??""}</td><td>${it.return_rate??""}</td><td>${it.notes||""}</td>
+    const te=Number(it.total_earnings)
+    const teCls = isFinite(te) ? (te>=0?"pos":"neg") : ""
+    tr.innerHTML=`<td>${it.code||""}</td><td>${it.fund_name||""}</td><td>${it.amount??""}</td><td>${it.earnings_yesterday??""}</td><td class="${teCls}">${it.total_earnings??""}</td>
     <td>
       <button class="edit" data-code="${it.code||""}">修改</button>
       <button class="del" data-code="${it.code||""}">删除</button>
@@ -354,25 +442,25 @@ function render(items){
       const tr=btn.closest("tr")
       const tds=tr.querySelectorAll("td")
       const amtInput=document.createElement("input")
-      amtInput.value=tds[1].textContent||""
+      amtInput.value=tds[2].textContent||""
       const eyInput=document.createElement("input")
-      eyInput.value=tds[2].textContent||""
+      eyInput.value=tds[3].textContent||""
       const teInput=document.createElement("input")
-      teInput.value=tds[3].textContent||""
-      const rrInput=document.createElement("input")
-      rrInput.value=tds[4].textContent||""
-      const ntInput=document.createElement("input")
-      ntInput.value=tds[5].textContent||""
-      tds[1].innerHTML=""
-      tds[1].appendChild(amtInput)
+      teInput.value=tds[4].textContent||""
+      // const rrInput=document.createElement("input") // 移除持有收益率
+      // rrInput.value=tds[5].textContent||""
+      // const ntInput=document.createElement("input")
+      // ntInput.value=tds[5].textContent||"" // notes index changed
       tds[2].innerHTML=""
-      tds[2].appendChild(eyInput)
+      tds[2].appendChild(amtInput)
       tds[3].innerHTML=""
-      tds[3].appendChild(teInput)
+      tds[3].appendChild(eyInput)
       tds[4].innerHTML=""
-      tds[4].appendChild(rrInput)
-      tds[5].innerHTML=""
-      tds[5].appendChild(ntInput)
+      tds[4].appendChild(teInput)
+      // tds[5].innerHTML=""
+      // tds[5].appendChild(rrInput)
+      // tds[5].innerHTML=""
+      // tds[5].appendChild(ntInput)
       btn.textContent="保存"
       btn.onclick=async ()=>{
         if(!code){ alert("请先补完基金编号"); return }
@@ -381,8 +469,8 @@ function render(items){
         if(amtInput.value.trim()) body.set("amount", amtInput.value.trim())
         if(eyInput.value.trim()) body.set("earnings_yesterday", eyInput.value.trim())
         if(teInput.value.trim()) body.set("total_earnings", teInput.value.trim())
-        if(rrInput.value.trim()) body.set("return_rate", rrInput.value.trim())
-        if(ntInput.value.trim()) body.set("notes", ntInput.value.trim())
+        // if(rrInput.value.trim()) body.set("return_rate", rrInput.value.trim())
+        // if(ntInput.value.trim()) body.set("notes", ntInput.value.trim())
         await fetch("/api/admin/portfolio/update",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:body.toString()})
         loadList()
       }
@@ -914,21 +1002,15 @@ class Handler(BaseHTTPRequestHandler):
             if not raw:
                 self._send_json({"items": []})
                 return
-            pos_items = get_user_positions_json() or []
-            pos_map = {}
-            for it in pos_items:
-                cd = str(it.get("code") or "").strip()
-                if cd:
-                    pos_map[cd] = {"amount": float(it.get("amount") or 0) if it.get("amount") is not None else 0.0, "fund_name": it.get("fund_name"), "total_earnings": it.get("total_earnings")}
-            daily_batch = []
-            today = datetime.datetime.now().date().isoformat()
+            now = datetime.datetime.now()
+            after_close = now.hour >= 18
             items = []
             for code in [x.strip() for x in raw.split(",") if x.strip()]:
                 obj = get_fund(code) or {}
                 est = fetch_fund_estimation(code)
                 if est:
                     obj.update(est)
-                navc = fetch_latest_nav_change(code)
+                navc = fetch_latest_nav_change(code) if after_close else None
                 if navc and navc.get("pct") is not None:
                     try:
                         obj["daily_pct"] = float(navc.get("pct"))
@@ -936,32 +1018,15 @@ class Handler(BaseHTTPRequestHandler):
                         obj["daily_pct"] = None
                     obj["daily_pct_date"] = navc.get("date")
                     obj["pct_source"] = "official"
+                    obj["nav_fetched_at"] = now.strftime("%H:%M")
                 else:
                     try:
                         obj["daily_pct"] = float((est or {}).get("gszzl") or 0.0)
                     except Exception:
                         obj["daily_pct"] = None
                     obj["pct_source"] = "estimate"
-                if navc and navc.get("pct") is not None and (not navc.get("date") or navc.get("date") == today):
-                    amt = (pos_map.get(code) or {}).get("amount") or 0.0
-                    if amt and amt > 0:
-                        pct = float(navc.get("pct"))
-                        prof = amt * pct / 100.0
-                        daily_batch.append({"code": code, "fund_name": (pos_map.get(code) or {}).get("fund_name"), "amount": amt, "return_rate": pct, "profit": prof})
-                        prev_total = (pos_map.get(code) or {}).get("total_earnings")
-                        upsert_user_positions_json([{
-                            "code": code,
-                            "fund_name": (pos_map.get(code) or {}).get("fund_name"),
-                            "amount": amt,
-                            "earnings_yesterday": prof,
-                            "total_earnings": prev_total,
-                            "return_rate": pct,
-                            "notes": (pos_map.get(code) or {}).get("notes")
-                        }])
                 if obj:
                     items.append(obj)
-            if daily_batch:
-                upsert_user_positions_daily(daily_batch, today, "refresh")
             self._send_json({"items": items})
             return
         if p.path.startswith("/api/fund/"):
@@ -1256,12 +1321,13 @@ def _current_slot_label(now):
         if 0 <= (now - t).total_seconds() <= 300:
             return lab
     return f"{hh:02d}:{mm:02d}"
-def settle_positions():
+def settle_positions(time_slot="close", do_rollup=False):
     items = get_user_positions_json() or []
     cnt = 0
     now = datetime.datetime.now()
     slot = _current_slot_label(now)
     daily_batch = []
+    to_update = []
     for it in items:
         code = str(it.get("code") or "").strip()
         if not code or code.startswith("NOCODE:"):
@@ -1290,36 +1356,47 @@ def settle_positions():
             "return_rate": pct,
             "profit": prof
         })
+        to_update.append({
+            "code": code,
+            "fund_name": it.get("fund_name"),
+            "amount": it.get("amount"),
+            "earnings_yesterday": prof,
+            "total_earnings": it.get("total_earnings"),
+            "return_rate": pct,
+            "notes": it.get("notes")
+        })
         cnt += 1
     date_str = now.date().isoformat()
     if daily_batch:
-        upsert_user_positions_daily(daily_batch, date_str, slot)
-        # if final slot of the day, roll up into positions table
-        if slot == "23:50":
-            sums = sum_daily_profit_by_code(date_str)
-            items_cur = get_user_positions_json() or []
-            to_write = []
-            for it in items_cur:
-                code = str(it.get("code") or "").strip()
-                if not code:
-                    continue
-                delta = float(sums.get(code) or 0.0)
-                total_prev = it.get("total_earnings")
-                try:
-                    total_prev = float(total_prev) if total_prev is not None else 0.0
-                except Exception:
-                    total_prev = 0.0
-                to_write.append({
-                    "code": code,
-                    "fund_name": it.get("fund_name"),
-                    "amount": it.get("amount"),
-                    "earnings_yesterday": delta,
-                    "total_earnings": total_prev + delta,
-                    "return_rate": it.get("return_rate"),
-                    "notes": it.get("notes")
-                })
-            if to_write:
-                upsert_user_positions_json(to_write)
+        upsert_user_positions_daily(daily_batch, date_str, time_slot)
+    if to_update:
+        upsert_user_positions_json(to_update)
+    if do_rollup and daily_batch:
+        prof_map = {str(x.get("code") or "").strip(): x for x in daily_batch}
+        items_cur = get_user_positions_json() or []
+        to_write = []
+        for it in items_cur:
+            code = str(it.get("code") or "").strip()
+            if not code:
+                continue
+            rec = prof_map.get(code) or {}
+            delta = float(rec.get("profit") or 0.0)
+            total_prev = it.get("total_earnings")
+            try:
+                total_prev = float(total_prev) if total_prev is not None else 0.0
+            except Exception:
+                total_prev = 0.0
+            to_write.append({
+                "code": code,
+                "fund_name": it.get("fund_name"),
+                "amount": it.get("amount"),
+                "earnings_yesterday": delta,
+                "total_earnings": total_prev + delta,
+                "return_rate": rec.get("return_rate"),
+                "notes": it.get("notes")
+            })
+        if to_write:
+            upsert_user_positions_json(to_write)
     _last_settlement_info["date"] = date_str
     _last_settlement_info["ts"] = int(now.timestamp())
     _last_settlement_info["slot"] = slot
@@ -1338,7 +1415,18 @@ def _seconds_until(target_h, target_m):
     return max(1, int((target - now).total_seconds()))
 
 def start_settlement_scheduler():
-    times = [(22,30),(23,0),(23,30),(23,50)]
+    times = []
+    h = 18
+    m = 0
+    while True:
+        if h > 23 or (h == 23 and m > 30):
+            break
+        times.append((h, m))
+        m += 30
+        if m >= 60:
+            h += 1
+            m = 0
+    times.append((23, 50))
     def loop():
         while True:
             now = datetime.datetime.now()
@@ -1353,7 +1441,9 @@ def start_settlement_scheduler():
                 secs = int((t - now).total_seconds())
             time.sleep(max(1, min(secs, 3600)))
             try:
-                settle_positions()
+                now2 = datetime.datetime.now()
+                do_rollup = (now2.hour == 23 and now2.minute == 50)
+                settle_positions(time_slot="close", do_rollup=do_rollup)
             except Exception:
                 pass
     th = threading.Thread(target=loop, daemon=True)
