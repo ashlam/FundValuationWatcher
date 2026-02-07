@@ -3,10 +3,30 @@ import os
 import time
 import threading
 import datetime
-from http.server import BaseHTTPRequestHandler, HTTPServer
-from urllib.parse import urlparse, parse_qs
+import secrets
+from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
+from urllib.parse import urlparse, parse_qs, quote, unquote
 from .eastmoney import fetch_fund_estimation, fetch_fund_profile, fetch_fundcode_search, fetch_latest_nav_change
-from .db import init_db, get_fund, upsert_fund_profile, upsert_asset_allocations, get_stats, upsert_user_positions_json, get_user_positions_json, delete_user_position_json, clear_user_positions_json, find_fund_code_by_name, upsert_user_positions_daily, get_user_positions_daily, sum_daily_profit_by_code
+from .db import init_db, get_fund, upsert_fund_profile, upsert_asset_allocations, get_stats, find_fund_code_by_name
+from .users_db import (
+    init_users_db,
+    migrate_legacy_positions_from_fund_db,
+    authenticate,
+    create_session,
+    delete_session,
+    get_user_by_session,
+    list_users,
+    create_user,
+    delete_user,
+    list_user_ids,
+    get_user_positions_json,
+    upsert_user_positions_json,
+    delete_user_position_json,
+    clear_user_positions_json,
+    upsert_user_positions_daily,
+    get_user_positions_daily,
+    sum_daily_profit_by_code,
+)
 from .akshare import fetch_all_funds_basic, fetch_fund_detail_xq
 
 INDEX_HTML = """<!doctype html>
@@ -39,6 +59,7 @@ th,td{border-bottom:1px solid #eee;padding:8px;text-align:left;font-size:14px}
 <a href="/">估值</a>
 <a href="/upload-portfolio">个人持仓</a>
 <a href="/admin/funds">基金资料维护</a>
+<span style="margin-left:auto" id="authLinks"></span>
 </div>
 <div class="row">
 <input id="codes" placeholder="输入基金代码，逗号分隔，如 110022,161039" />
@@ -52,7 +73,7 @@ th,td{border-bottom:1px solid #eee;padding:8px;text-align:left;font-size:14px}
 <button id="loadMy">加载我的持仓估值</button>
 </div>
 <div class="row">
-<span>持仓总金额：<strong id="sumAmount">-</strong></span>
+<span>持仓总金额：<strong id="sumAmount">-</strong><button id="toggleSumAmt" class="pbtn" type="button">隐私</button></span>
 <span style="margin-left:16px">当日盈亏总金额：<strong id="sumProfit">-</strong></span>
 </div>
 <table>
@@ -86,6 +107,17 @@ let sortKey=null
 let sortAsc=true
 let hideAmount=false
 let hideTotalEarnings=false
+let hideSumAmount=false
+const toggleSumAmtBtn=document.getElementById("toggleSumAmt")
+if(toggleSumAmtBtn){
+  toggleSumAmtBtn.addEventListener("click", (e)=>{
+    if(e){ e.stopPropagation() }
+    hideSumAmount=!hideSumAmount
+    toggleSumAmtBtn.className="pbtn"+(hideSumAmount?" on":"")
+    toggleSumAmtBtn.textContent=hideSumAmount?"显示":"隐私"
+    render(lastItems)
+  })
+}
 const toggleAmtBtn=document.getElementById("toggleAmt")
 const toggleTeBtn=document.getElementById("toggleTe")
 if(toggleAmtBtn){
@@ -223,7 +255,7 @@ function render(items){
   tr.innerHTML=`<td>${fmt(it.fundcode)}</td><td>${fmt(it.name)}</td><td>${amtStr}</td><td class="${cls}">${pct}%</td><td class="${todayProfit>=0?"pos":"neg"}">${amt?todayProfit.toFixed(2):""}</td><td class="${teCls}">${teShow}</td><td class="${rrCls}">${rrStr}</td><td>${fmt(it.jzrq)}</td><td class="${timeCls}">${timeStr}</td>`
     tbody.appendChild(tr)
   }
-  if(sumAmountEl) sumAmountEl.textContent = sumAmt ? sumAmt.toFixed(2) : "0.00"
+  if(sumAmountEl) sumAmountEl.textContent = hideSumAmount ? "****" : (sumAmt ? sumAmt.toFixed(2) : "0.00")
   if(sumProfitEl) { sumProfitEl.textContent = (sumProfit>=0?"+":"") + (sumProfit ? sumProfit.toFixed(2) : "0.00"); sumProfitEl.className = (sumProfit>=0?"pos":"neg") }
 }
 async function load(){
@@ -238,8 +270,23 @@ async function load(){
     render([])
   }
 }
+async function initAuthLinks(){
+  const el=document.getElementById("authLinks")
+  if(!el) return
+  try{
+    const r=await fetch("/api/session",{cache:"no-store"})
+    const j=await r.json()
+    if(j && j.logged_in){
+      const uname=String(j.username||"")
+      el.innerHTML = `<span class="muted">用户：${uname}</span> <a href="/switch-user">切换用户</a> <a href="/logout">登出</a>` + (j.is_super?` <a href="/admin/users">管理用户</a>`:"")
+    }else{
+      el.innerHTML = `<a href="/login">登录</a>`
+    }
+  }catch(e){}
+}
 refreshBtn.addEventListener("click",load)
 window.addEventListener("load",async ()=>{
+  await initAuthLinks()
   await initPortfolio()
   await initRefresh()
   codesInput.value="110022,161039"
@@ -321,6 +368,7 @@ th,td{border-bottom:1px solid #eee;padding:8px;text-align:left;font-size:14px}
 <a href="/">估值</a>
 <a href="/upload-portfolio">个人持仓</a>
 <a href="/admin/funds">基金资料维护</a>
+<span style="margin-left:auto" id="authLinks"></span>
 </div>
 <div class="col">
 <div class="row">
@@ -393,6 +441,20 @@ th,td{border-bottom:1px solid #eee;padding:8px;text-align:left;font-size:14px}
 <script>
 const statusEl=document.getElementById("status")
 const tbody=document.getElementById("tbody")
+async function initAuthLinks(){
+  const el=document.getElementById("authLinks")
+  if(!el) return
+  try{
+    const r=await fetch("/api/session",{cache:"no-store"})
+    const j=await r.json()
+    if(j && j.logged_in){
+      const uname=String(j.username||"")
+      el.innerHTML = `<span class="muted">用户：${uname}</span> <a href="/switch-user">切换用户</a> <a href="/logout">登出</a>` + (j.is_super?` <a href="/admin/users">管理用户</a>`:"")
+    }else{
+      el.innerHTML = `<a href="/login">登录</a>`
+    }
+  }catch(e){}
+}
 const tabJson=document.getElementById("tabJson")
 const tabTsv=document.getElementById("tabTsv")
 const tabCsv=document.getElementById("tabCsv")
@@ -703,6 +765,8 @@ completeCodes.addEventListener("click",async ()=>{
   }
 })
 // 已移除OCR提交
+initAuthLinks()
+loadList()
 </script>
 </body>
 </html>
@@ -814,20 +878,26 @@ submit.addEventListener("click",async ()=>{
 """
 
 class Handler(BaseHTTPRequestHandler):
-    def _send_json(self, obj, status=200):
+    def _send_json(self, obj, status=200, extra_headers=None):
         data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
+        if extra_headers:
+            for k, v in (extra_headers or {}).items():
+                self.send_header(str(k), str(v))
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
 
-    def _send_html(self, html):
+    def _send_html(self, html, status=200, extra_headers=None):
         data = html.encode("utf-8")
-        self.send_response(200)
+        self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
+        if extra_headers:
+            for k, v in (extra_headers or {}).items():
+                self.send_header(str(k), str(v))
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -835,9 +905,144 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         return
 
+    def _parse_cookies(self):
+        raw = self.headers.get("Cookie") or ""
+        out = {}
+        for part in raw.split(";"):
+            s = part.strip()
+            if not s or "=" not in s:
+                continue
+            k, v = s.split("=", 1)
+            out[k.strip()] = v.strip()
+        return out
+
+    def _current_user(self):
+        ck = self._parse_cookies()
+        tok = ck.get("fw_session")
+        if not tok:
+            return None
+        return get_user_by_session(tok)
+
+    def _set_session_cookie_header(self, token):
+        if token:
+            return f"fw_session={token}; Path=/; HttpOnly; SameSite=Lax"
+        return "fw_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"
+
+    def _redirect(self, location, *, set_cookie_header=None):
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Cache-Control", "no-store")
+        if set_cookie_header:
+            self.send_header("Set-Cookie", set_cookie_header)
+        self.end_headers()
+
+    def _require_login_page(self, next_url):
+        u = self._current_user()
+        if u:
+            return u
+        q = quote(str(next_url or "/"), safe="")
+        self._send_html(
+            "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>"
+            "<title>未登录</title><style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;max-width:720px;margin:24px auto;padding:0 16px;color:#666}"
+            "a{color:#1a73e8;text-decoration:none}</style></head><body>"
+            "<h2>未登录</h2><p>需要先登录才能访问此页面。</p>"
+            f"<p><a href='/login?next={q}'>去登录</a></p>"
+            "</body></html>"
+        )
+        return None
+
+    def _require_login_api(self):
+        u = self._current_user()
+        if u:
+            return u
+        self._send_json({"ok": False, "error": "not_logged_in"}, status=401)
+        return None
+
     def do_GET(self):
         p = urlparse(self.path)
+        if p.path == "/api/session":
+            u = self._current_user()
+            if not u:
+                self._send_json({"ok": True, "logged_in": False})
+                return
+            self._send_json({"ok": True, "logged_in": True, "username": u.get("username"), "is_super": bool(u.get("is_super"))})
+            return
+        if p.path == "/switch-user":
+            ck = self._parse_cookies()
+            tok = ck.get("fw_session")
+            if tok:
+                delete_session(tok)
+            self._redirect("/login", set_cookie_header=self._set_session_cookie_header(None))
+            return
+        if p.path == "/login":
+            q = parse_qs(p.query or "")
+            nxt = unquote((q.get("next") or ["/"])[0] or "/")
+            cur = self._current_user()
+            cur_user = (cur or {}).get("username") if cur else None
+            cur_block = f"<div class='row'><span class='muted'>当前已登录：{cur_user}（如要切换用户，请先 <a href=\"/switch-user\">登出</a>）</span></div>" if cur_user else ""
+            html = """<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>登录</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;max-width:720px;margin:24px auto;padding:0 16px;color:#666}
+h1{font-size:22px;margin:0 0 12px;color:#666}
+.row{display:flex;gap:8px;margin:12px 0}
+input{flex:1;padding:8px 10px;border:1px solid #ccc;border-radius:6px;color:#666}
+button{padding:8px 12px;border:1px solid #1a73e8;background:#1a73e8;color:#fff;border-radius:6px}
+.muted{color:#888}
+a{color:#1a73e8;text-decoration:none}
+</style>
+</head>
+<body>
+<h1>登录</h1>
+%s
+<div class="row"><input id="u" placeholder="用户名" /></div>
+<div class="row"><input id="p" placeholder="密码" type="password" /></div>
+<div class="row"><button id="btn">登录</button></div>
+<div class="row"><span id="msg" class="muted"></span></div>
+<div class="row"><span class="muted">默认超级用户：admin/admin</span></div>
+<script>
+const nextUrl=%s
+document.getElementById("btn").addEventListener("click", async ()=>{
+  const u=document.getElementById("u").value.trim()
+  const p=document.getElementById("p").value
+  const msg=document.getElementById("msg")
+  if(!u||!p){ msg.textContent="请输入用户名和密码"; return }
+  try{
+    const body=new URLSearchParams()
+    body.set("username", u)
+    body.set("password", p)
+    const r=await fetch("/api/login",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:body.toString()})
+    const j=await r.json()
+    if(r.status===200 && j.ok){
+      location.href=nextUrl||"/"
+    }else{
+      msg.textContent=j.error||"登录失败"
+    }
+  }catch(e){
+    msg.textContent="登录失败"
+  }
+})
+</script>
+</body>
+</html>
+""" % (cur_block, json.dumps(nxt))
+            self._send_html(html)
+            return
+        if p.path == "/logout":
+            ck = self._parse_cookies()
+            tok = ck.get("fw_session")
+            if tok:
+                delete_session(tok)
+            self._redirect("/login", set_cookie_header=self._set_session_cookie_header(None))
+            return
         if p.path == "/":
+            u = self._require_login_page("/")
+            if not u:
+                return
             self._send_html(INDEX_HTML)
             return
         if p.path == "/api/config":
@@ -848,6 +1053,9 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(cfg)
             return
         if p.path == "/upload-portfolio":
+            u = self._require_login_page("/upload-portfolio")
+            if not u:
+                return
             self._send_html(UPLOAD_PORTFOLIO_HTML)
             return
         if p.path == "/admin/funds":
@@ -952,6 +1160,12 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"ok": True, "total": total})
             return
         if p.path == "/api/admin/settlement/run":
+            u = self._require_login_api()
+            if not u:
+                return
+            if not u.get("is_super"):
+                self._send_json({"ok": False, "error": "forbidden"}, status=403)
+                return
             r = settle_positions()
             self._send_json({"ok": True, "count": r.get("count"), "ts": r.get("ts"), "date": r.get("date")})
             return
@@ -960,18 +1174,24 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json(s)
             return
         if p.path == "/api/admin/settlement/daily":
+            u = self._require_login_api()
+            if not u:
+                return
             q = parse_qs(p.query or "")
             d = (q.get("date") or [""])[0].strip()
-            items = get_user_positions_daily(d if d else None)
+            items = get_user_positions_daily(u.get("id"), d if d else None)
             self._send_json({"items": items})
             return
         if p.path == "/api/admin/settlement/recompute":
+            u = self._require_login_api()
+            if not u:
+                return
             q = parse_qs(p.query or "")
             d = (q.get("date") or [""])[0].strip()
             if not d:
                 d = datetime.datetime.now().date().isoformat()
-            sums = sum_daily_profit_by_code(d)
-            items = get_user_positions_json() or []
+            sums = sum_daily_profit_by_code(u.get("id"), d)
+            items = get_user_positions_json(u.get("id")) or []
             to_write = []
             for it in items:
                 code = str(it.get("code") or "").strip()
@@ -993,10 +1213,13 @@ class Handler(BaseHTTPRequestHandler):
                     "notes": it.get("notes")
                 })
             if to_write:
-                upsert_user_positions_json(to_write)
+                upsert_user_positions_json(u.get("id"), to_write)
             self._send_json({"ok": True, "date": d, "updated": len(to_write)})
             return
         if p.path == "/api/funds":
+            u = self._require_login_api()
+            if not u:
+                return
             q = parse_qs(p.query or "")
             raw = (q.get("codes") or [""])[0].strip()
             if not raw:
@@ -1041,10 +1264,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json({"error": "not_found"}, status=404)
             return
         if p.path == "/api/admin/portfolio":
-            self._send_json({"items": get_user_positions_json()})
+            u = self._require_login_api()
+            if not u:
+                return
+            self._send_json({"items": get_user_positions_json(u.get("id"))})
             return
         if p.path == "/api/admin/portfolio/codes":
-            codes = [it.get("code") for it in get_user_positions_json() if it.get("code") and not str(it.get("code")).startswith("NOCODE:")]
+            u = self._require_login_api()
+            if not u:
+                return
+            codes = [it.get("code") for it in get_user_positions_json(u.get("id")) if it.get("code") and not str(it.get("code")).startswith("NOCODE:")]
             self._send_json({"codes": codes})
             return
         if p.path.startswith("/api/admin/fund/local"):
@@ -1077,6 +1306,79 @@ class Handler(BaseHTTPRequestHandler):
             html += """<div class="row"><strong>一键补充/更新（EastMoney基金代码库）</strong></div><div class="row"><input id="emLimit" placeholder="每批条数（默认500）"><input id="emOffset" placeholder="起始offset（默认0）"><button id="emIngest">批量导入</button></div><div class="row"><div class="progress" style="width:100%;height:8px;background:#eee;border-radius:6px"><div id="emBar" style="height:100%;background:#1a73e8;width:0%;border-radius:6px"></div></div></div><script>document.getElementById("emIngest").addEventListener("click",async()=>{const limRaw=document.getElementById("emLimit").value.trim();const offRaw=document.getElementById("emOffset").value.trim();const chunk=limRaw?parseInt(limRaw,10):500;let offset=offRaw?parseInt(offRaw,10):0;let total=0;let done=0;const bar=document.getElementById("emBar");const statusEl=document.getElementById("status");statusEl.textContent="准备中...";try{const meta=await fetch("/api/admin/eastmoney/fundcodes/meta");if(meta.ok){const j=await meta.json();total=j.total||0}}catch(e){}if(!total){statusEl.textContent="无法获取总量，改为单次导入";const q=new URLSearchParams();if(limRaw) q.set("limit",limRaw);if(offRaw) q.set("offset",offRaw);const r=await fetch("/api/admin/eastmoney/fundcodes/ingest?"+q.toString());const j=await r.json();statusEl.textContent=j.ok?`已导入 ${j.count||0} 条`:"导入失败";bar.style.width="100%";return}statusEl.textContent=`开始导入，共 ${total} 条`;while(offset<total){const q=new URLSearchParams();q.set("limit", String(chunk));q.set("offset", String(offset));const r=await fetch("/api/admin/eastmoney/fundcodes/ingest?"+q.toString());const j=await r.json();if(!j.ok){statusEl.textContent="导入失败";break}done+=j.count||0;offset+=chunk;const pct=Math.min(100, Math.floor(done*100/total));bar.style.width=pct+"%";statusEl.textContent=`已导入 ${done}/${total}`;}if(offset>=total){bar.style.width="100%";statusEl.textContent=`完成，共导入 ${done} 条`;}});</script>"""
             self._send_html(html)
             return
+        if p.path == "/admin/users":
+            u = self._require_login_page("/admin/users")
+            if not u:
+                return
+            if not u.get("is_super"):
+                self._send_html(
+                    "<!doctype html><html><head><meta charset='utf-8'><meta name='viewport' content='width=device-width, initial-scale=1'>"
+                    "<title>无权限</title><style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;max-width:720px;margin:24px auto;padding:0 16px;color:#666}"
+                    "a{color:#1a73e8;text-decoration:none}</style></head><body><h2>无权限</h2><p>此页面仅超级用户可用。</p><p><a href='/'>返回</a></p></body></html>",
+                    status=403,
+                )
+                return
+            users = list_users() or []
+            rows = "".join(
+                [
+                    f"<tr><td>{it.get('id')}</td><td>{it.get('username')}</td><td>{'是' if it.get('is_super') else ''}</td>"
+                    f"<td><button class='del' data-u='{it.get('username')}'>删除</button></td></tr>"
+                    for it in users
+                ]
+            )
+            html = """<!doctype html><html><head><meta charset="utf-8"><title>管理用户</title><meta name="viewport" content="width=device-width, initial-scale=1">
+<style>body{{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;max-width:900px;margin:24px auto;padding:0 16px;color:#666}}
+h1{{font-size:22px;margin:0 0 12px;color:#666}}
+.nav{{display:flex;gap:12px;padding:8px 0;border-bottom:1px solid #eee;margin-bottom:12px}}
+.nav a{{color:#1a73e8;text-decoration:none}}
+.row{{display:flex;gap:8px;margin:12px 0}}
+input{{flex:1;padding:8px 10px;border:1px solid #ccc;border-radius:6px;color:#666}}
+button{{padding:8px 12px;border:1px solid #1a73e8;background:#1a73e8;color:#fff;border-radius:6px}}
+table{{width:100%;border-collapse:collapse;margin-top:12px;color:#666}}
+th,td{{border-bottom:1px solid #eee;padding:8px;text-align:left;font-size:14px}}
+.muted{{color:#888}}</style></head><body>
+<h1>管理用户</h1>
+<div class="nav"><a href="/">估值</a><a href="/upload-portfolio">个人持仓</a><a href="/admin/funds">基金资料维护</a><a href="/admin/users">管理用户</a><a href="/logout">登出</a></div>
+<div class="row"><input id="nu" placeholder="新用户名" /><input id="np" placeholder="新密码" type="password" /><button id="add">添加</button></div>
+<div class="row"><span id="msg" class="muted"></span></div>
+<table><thead><tr><th>ID</th><th>用户名</th><th>超级用户</th><th>操作</th></tr></thead><tbody>__ROWS__</tbody></table>
+<script>
+async function post(url, body){
+  const r=await fetch(url,{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:body.toString()})
+  const j=await r.json()
+  return {r,j}
+}
+document.getElementById("add").addEventListener("click", async ()=>{
+  const u=document.getElementById("nu").value.trim()
+  const p=document.getElementById("np").value
+  const msg=document.getElementById("msg")
+  if(!u||!p){msg.textContent="请输入用户名和密码";return}
+  const body=new URLSearchParams()
+  body.set("username",u); body.set("password",p)
+  try{
+    const {r,j}=await post("/api/super/users/add", body)
+    msg.textContent=(r.status===200&&j.ok)?"已添加":"添加失败："+(j.error||"")
+    if(r.status===200&&j.ok) location.reload()
+  }catch(e){msg.textContent="添加失败"}
+})
+document.querySelectorAll("button.del").forEach(btn=>{
+  btn.addEventListener("click", async ()=>{
+    const u=btn.getAttribute("data-u")
+    if(!u||u==="admin") return
+    if(!confirm("确定删除用户 "+u+" 吗？")) return
+    const body=new URLSearchParams(); body.set("username",u)
+    const msg=document.getElementById("msg")
+    try{
+      const {r,j}=await post("/api/super/users/delete", body)
+      msg.textContent=(r.status===200&&j.ok)?"已删除":"删除失败："+(j.error||"")
+      if(r.status===200&&j.ok) location.reload()
+    }catch(e){msg.textContent="删除失败"}
+  })
+})
+</script></body></html>"""
+            html = html.replace("__ROWS__", rows).replace("{{", "{").replace("}}", "}")
+            self._send_html(html)
+            return
         self.send_response(404)
         self.end_headers()
 
@@ -1084,11 +1386,91 @@ class Handler(BaseHTTPRequestHandler):
         p = urlparse(self.path)
         # 已移除 /api/admin/holdings/ocr
         # 已移除 /api/admin/portfolio/ocr
+        if p.path == "/api/login":
+            ck = self._parse_cookies()
+            old_tok = ck.get("fw_session")
+            if old_tok:
+                delete_session(old_tok)
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except Exception:
+                length = 0
+            body = self.rfile.read(length) if length > 0 else b""
+            kv = {}
+            try:
+                kv = parse_qs(body.decode("utf-8", errors="ignore"))
+            except Exception:
+                kv = {}
+            username = (kv.get("username") or [""])[0].strip()
+            password = (kv.get("password") or [""])[0]
+            u = authenticate(username, password)
+            if not u:
+                self._send_json({"ok": False, "error": "invalid_credentials"}, status=401)
+                return
+            tok = create_session(u.get("id"))
+            self._send_json({"ok": True, "username": u.get("username"), "is_super": bool(u.get("is_super"))}, extra_headers={"Set-Cookie": self._set_session_cookie_header(tok)})
+            return
+        if p.path == "/api/super/users/add":
+            u = self._require_login_api()
+            if not u:
+                return
+            if not u.get("is_super"):
+                self._send_json({"ok": False, "error": "forbidden"}, status=403)
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except Exception:
+                length = 0
+            body = self.rfile.read(length) if length > 0 else b""
+            kv = {}
+            try:
+                kv = parse_qs(body.decode("utf-8", errors="ignore"))
+            except Exception:
+                kv = {}
+            username = (kv.get("username") or [""])[0].strip()
+            password = (kv.get("password") or [""])[0]
+            try:
+                create_user(username, password, is_super=False)
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, status=400)
+                return
+            self._send_json({"ok": True})
+            return
+        if p.path == "/api/super/users/delete":
+            u = self._require_login_api()
+            if not u:
+                return
+            if not u.get("is_super"):
+                self._send_json({"ok": False, "error": "forbidden"}, status=403)
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except Exception:
+                length = 0
+            body = self.rfile.read(length) if length > 0 else b""
+            kv = {}
+            try:
+                kv = parse_qs(body.decode("utf-8", errors="ignore"))
+            except Exception:
+                kv = {}
+            username = (kv.get("username") or [""])[0].strip()
+            deleted = delete_user(username)
+            if not deleted:
+                self._send_json({"ok": False, "error": "not_found_or_protected"}, status=400)
+                return
+            self._send_json({"ok": True})
+            return
         if p.path == "/api/admin/portfolio/clear":
-            clear_user_positions_json()
+            u = self._require_login_api()
+            if not u:
+                return
+            clear_user_positions_json(u.get("id"))
             self._send_json({"ok": True})
             return
         if p.path == "/api/admin/portfolio/import_test_data":
+            u = self._require_login_api()
+            if not u:
+                return
             q = parse_qs(p.query or "")
             path = (q.get("path") or [""])[0].strip() or "/Users/wenguanggu/MyProjects/Python/FundValuationWatcher/fundwatcher/test_data/funds.json"
             try:
@@ -1115,10 +1497,13 @@ class Handler(BaseHTTPRequestHandler):
                     continue
                 items.append({"code": code, "fund_name": name, "amount": amount, "earnings_yesterday": yp, "total_earnings": it.get("total_earnings"), "return_rate": hr, "notes": it.get("notes")})
             if items:
-                upsert_user_positions_json(items)
+                upsert_user_positions_json(u.get("id"), items)
             self._send_json({"ok": True, "count": len(items)})
             return
         if p.path == "/api/admin/portfolio/json":
+            u = self._require_login_api()
+            if not u:
+                return
             try:
                 length = int(self.headers.get("Content-Length", "0"))
             except Exception:
@@ -1148,10 +1533,13 @@ class Handler(BaseHTTPRequestHandler):
                 filled.append({"code": code, "fund_name": fund_name, "amount": it.get("amount"), "earnings_yesterday": it.get("earnings_yesterday"), "total_earnings": it.get("total_earnings"), "return_rate": it.get("return_rate"), "notes": it.get("notes")})
             commit = ((parse_qs(p.query or "").get("commit") or ["1"])[0].strip().lower() in ("1","true","yes"))
             if filled and commit:
-                upsert_user_positions_json(filled)
+                upsert_user_positions_json(u.get("id"), filled)
             self._send_json({"ok": True, "count": len(filled), "items": filled, "committed": bool(filled and commit)})
             return
         if p.path == "/api/admin/portfolio/add":
+            u = self._require_login_api()
+            if not u:
+                return
             q = parse_qs(p.query or "")
             try:
                 length = int(self.headers.get("Content-Length", "0"))
@@ -1177,10 +1565,13 @@ class Handler(BaseHTTPRequestHandler):
             eyy = float(ey) if ey else None
             tee = float(te) if te else None
             rr = float(rate) if rate else None
-            upsert_user_positions_json([{"code": code, "fund_name": fund_name or None, "amount": amt, "earnings_yesterday": eyy, "total_earnings": tee, "return_rate": rr, "notes": (notes or None)}])
+            upsert_user_positions_json(u.get("id"), [{"code": code, "fund_name": fund_name or None, "amount": amt, "earnings_yesterday": eyy, "total_earnings": tee, "return_rate": rr, "notes": (notes or None)}])
             self._send_json({"ok": True})
             return
         if p.path == "/api/admin/portfolio/update":
+            u = self._require_login_api()
+            if not u:
+                return
             try:
                 length = int(self.headers.get("Content-Length", "0"))
             except Exception:
@@ -1202,10 +1593,13 @@ class Handler(BaseHTTPRequestHandler):
             rr = (kv.get("return_rate") or [""])[0].strip()
             nt = (kv.get("notes") or [""])[0].strip()
             items = [{"code": code, "fund_name": fund_name or None, "amount": float(amt) if amt else None, "earnings_yesterday": float(ey) if ey else None, "total_earnings": float(te) if te else None, "return_rate": float(rr) if rr else None, "notes": nt or None}]
-            upsert_user_positions_json(items)
+            upsert_user_positions_json(u.get("id"), items)
             self._send_json({"ok": True})
             return
         if p.path == "/api/admin/portfolio/delete":
+            u = self._require_login_api()
+            if not u:
+                return
             try:
                 length = int(self.headers.get("Content-Length", "0"))
             except Exception:
@@ -1220,7 +1614,7 @@ class Handler(BaseHTTPRequestHandler):
             if not code:
                 self._send_json({"error": "missing_code"}, status=400)
                 return
-            delete_user_position_json(code)
+            delete_user_position_json(u.get("id"), code)
             self._send_json({"ok": True})
             return
         if p.path == "/api/admin/portfolio/complete_codes":
@@ -1322,81 +1716,81 @@ def _current_slot_label(now):
             return lab
     return f"{hh:02d}:{mm:02d}"
 def settle_positions(time_slot="close", do_rollup=False):
-    items = get_user_positions_json() or []
-    cnt = 0
     now = datetime.datetime.now()
     slot = _current_slot_label(now)
-    daily_batch = []
-    to_update = []
-    for it in items:
-        code = str(it.get("code") or "").strip()
-        if not code or code.startswith("NOCODE:"):
-            continue
-        amt = float(it.get("amount") or 0) or 0.0
-        est = fetch_fund_estimation(code)
-        pct = None
-        navc = fetch_latest_nav_change(code)
-        if navc and navc.get("pct") is not None:
-            try:
-                pct = float(navc.get("pct"))
-            except Exception:
-                pct = None
-        if pct is None:
-            if not est:
-                continue
-            pct = float(est.get("gszzl") or 0) if est.get("gszzl") is not None else 0.0
-        prof = amt * pct / 100.0 if amt and pct else 0.0
-        name = None
-        obj = get_fund(code) or {}
-        name = obj.get("name")
-        daily_batch.append({
-            "code": code,
-            "fund_name": name or it.get("fund_name"),
-            "amount": amt,
-            "return_rate": pct,
-            "profit": prof
-        })
-        to_update.append({
-            "code": code,
-            "fund_name": it.get("fund_name"),
-            "amount": it.get("amount"),
-            "earnings_yesterday": prof,
-            "total_earnings": it.get("total_earnings"),
-            "return_rate": pct,
-            "notes": it.get("notes")
-        })
-        cnt += 1
     date_str = now.date().isoformat()
-    if daily_batch:
-        upsert_user_positions_daily(daily_batch, date_str, time_slot)
-    if to_update:
-        upsert_user_positions_json(to_update)
-    if do_rollup and daily_batch:
-        prof_map = {str(x.get("code") or "").strip(): x for x in daily_batch}
-        items_cur = get_user_positions_json() or []
-        to_write = []
-        for it in items_cur:
+    cnt = 0
+    for uid in list_user_ids(include_admin=True):
+        items = get_user_positions_json(uid) or []
+        daily_batch = []
+        to_update = []
+        for it in items:
             code = str(it.get("code") or "").strip()
-            if not code:
+            if not code or code.startswith("NOCODE:"):
                 continue
-            rec = prof_map.get(code) or {}
-            delta = float(rec.get("profit") or 0.0)
-            total_prev = it.get("total_earnings")
-            try:
-                total_prev = float(total_prev) if total_prev is not None else 0.0
-            except Exception:
-                total_prev = 0.0
-            to_write.append({
+            amt = float(it.get("amount") or 0) or 0.0
+            est = fetch_fund_estimation(code)
+            pct = None
+            navc = fetch_latest_nav_change(code)
+            if navc and navc.get("pct") is not None:
+                try:
+                    pct = float(navc.get("pct"))
+                except Exception:
+                    pct = None
+            if pct is None:
+                if not est:
+                    continue
+                pct = float(est.get("gszzl") or 0) if est.get("gszzl") is not None else 0.0
+            prof = amt * pct / 100.0 if amt and pct else 0.0
+            obj = get_fund(code) or {}
+            name = obj.get("name")
+            daily_batch.append({
+                "code": code,
+                "fund_name": name or it.get("fund_name"),
+                "amount": amt,
+                "return_rate": pct,
+                "profit": prof
+            })
+            to_update.append({
                 "code": code,
                 "fund_name": it.get("fund_name"),
                 "amount": it.get("amount"),
-                "earnings_yesterday": delta,
-                "total_earnings": total_prev + delta,
-                "return_rate": rec.get("return_rate"),
+                "earnings_yesterday": prof,
+                "total_earnings": it.get("total_earnings"),
+                "return_rate": pct,
                 "notes": it.get("notes")
             })
-        if to_write:
-            upsert_user_positions_json(to_write)
+            cnt += 1
+        if daily_batch:
+            upsert_user_positions_daily(uid, daily_batch, date_str, time_slot)
+        if to_update:
+            upsert_user_positions_json(uid, to_update)
+        if do_rollup and daily_batch:
+            prof_map = {str(x.get("code") or "").strip(): x for x in daily_batch}
+            items_cur = get_user_positions_json(uid) or []
+            to_write = []
+            for it in items_cur:
+                code = str(it.get("code") or "").strip()
+                if not code:
+                    continue
+                rec = prof_map.get(code) or {}
+                delta = float(rec.get("profit") or 0.0)
+                total_prev = it.get("total_earnings")
+                try:
+                    total_prev = float(total_prev) if total_prev is not None else 0.0
+                except Exception:
+                    total_prev = 0.0
+                to_write.append({
+                    "code": code,
+                    "fund_name": it.get("fund_name"),
+                    "amount": it.get("amount"),
+                    "earnings_yesterday": delta,
+                    "total_earnings": total_prev + delta,
+                    "return_rate": rec.get("return_rate"),
+                    "notes": it.get("notes")
+                })
+            if to_write:
+                upsert_user_positions_json(uid, to_write)
     _last_settlement_info["date"] = date_str
     _last_settlement_info["ts"] = int(now.timestamp())
     _last_settlement_info["slot"] = slot
@@ -1451,6 +1845,18 @@ def start_settlement_scheduler():
 
 def run(port=8000):
     init_db()
+    init_users_db()
+    try:
+        admin_id = None
+        for it in (list_users() or []):
+            if str(it.get("username") or "").strip().lower() == "admin":
+                admin_id = it.get("id")
+                break
+        if admin_id:
+            fund_db_path = os.path.join(os.path.dirname(__file__), "funds.sqlite")
+            migrate_legacy_positions_from_fund_db(fund_db_path, admin_id)
+    except Exception:
+        pass
     start_settlement_scheduler()
-    httpd = HTTPServer(("", port), Handler)
+    httpd = ThreadingHTTPServer(("", port), Handler)
     httpd.serve_forever()
