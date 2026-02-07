@@ -110,11 +110,14 @@ def ensure_default_admin():
         conn.close()
 
 
-def list_users():
+def list_users(*, include_admin=True):
     conn = _connect()
     try:
         c = conn.cursor()
-        c.execute("SELECT id,username,is_super,created_at FROM users ORDER BY id ASC")
+        if include_admin:
+            c.execute("SELECT id,username,is_super,created_at FROM users ORDER BY id ASC")
+        else:
+            c.execute("SELECT id,username,is_super,created_at FROM users WHERE username<>? ORDER BY id ASC", ("admin",))
         items = []
         for uid, un, sup, ct in c.fetchall():
             items.append({"id": uid, "username": un, "is_super": int(sup or 0) == 1, "created_at": ct})
@@ -406,3 +409,38 @@ def migrate_legacy_positions_from_fund_db(fund_db_path, admin_user_id):
     except Exception:
         return {"ok": False, "migrated": 0}
 
+
+def purge_non_admin_users():
+    conn = _connect()
+    try:
+        c = conn.cursor()
+        c.execute("SELECT id FROM users WHERE username=?", ("admin",))
+        row = c.fetchone()
+        admin_id = int(row[0]) if row else None
+        if admin_id is None:
+            return {"ok": False, "error": "admin_missing", "deleted_users": 0, "deleted_sessions": 0, "deleted_positions": 0, "deleted_daily": 0}
+
+        c.execute("SELECT id FROM users WHERE username<>?", ("admin",))
+        other_ids = [int(x[0]) for x in c.fetchall()]
+        if not other_ids:
+            return {"ok": True, "deleted_users": 0, "deleted_sessions": 0, "deleted_positions": 0, "deleted_daily": 0}
+
+        q_marks = ",".join(["?"] * len(other_ids))
+        c.execute(f"DELETE FROM sessions WHERE user_id IN ({q_marks})", other_ids)
+        deleted_sessions = c.rowcount or 0
+        c.execute(f"DELETE FROM user_positions_json WHERE user_id IN ({q_marks})", other_ids)
+        deleted_positions = c.rowcount or 0
+        c.execute(f"DELETE FROM user_positions_daily WHERE user_id IN ({q_marks})", other_ids)
+        deleted_daily = c.rowcount or 0
+        c.execute(f"DELETE FROM users WHERE id IN ({q_marks})", other_ids)
+        deleted_users = c.rowcount or 0
+        conn.commit()
+        return {
+            "ok": True,
+            "deleted_users": deleted_users,
+            "deleted_sessions": deleted_sessions,
+            "deleted_positions": deleted_positions,
+            "deleted_daily": deleted_daily,
+        }
+    finally:
+        conn.close()

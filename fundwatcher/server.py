@@ -1318,7 +1318,7 @@ document.getElementById("btn").addEventListener("click", async ()=>{
                     status=403,
                 )
                 return
-            users = list_users() or []
+            users = list_users(include_admin=False) or []
             rows = "".join(
                 [
                     f"<tr><td>{it.get('id')}</td><td>{it.get('username')}</td><td>{'是' if it.get('is_super') else ''}</td>"
