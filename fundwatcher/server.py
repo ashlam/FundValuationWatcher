@@ -4,13 +4,12 @@ import time
 import threading
 import datetime
 import secrets
-from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, quote, unquote
 from .eastmoney import fetch_fund_estimation, fetch_fund_profile, fetch_fundcode_search, fetch_latest_nav_change
 from .db import init_db, get_fund, upsert_fund_profile, upsert_asset_allocations, get_stats, find_fund_code_by_name
 from .users_db import (
     init_users_db,
-    migrate_legacy_positions_from_fund_db,
     authenticate,
     create_session,
     delete_session,
@@ -1846,17 +1845,6 @@ def start_settlement_scheduler():
 def run(port=8000):
     init_db()
     init_users_db()
-    try:
-        admin_id = None
-        for it in (list_users() or []):
-            if str(it.get("username") or "").strip().lower() == "admin":
-                admin_id = it.get("id")
-                break
-        if admin_id:
-            fund_db_path = os.path.join(os.path.dirname(__file__), "funds.sqlite")
-            migrate_legacy_positions_from_fund_db(fund_db_path, admin_id)
-    except Exception:
-        pass
     start_settlement_scheduler()
     httpd = ThreadingHTTPServer(("", port), Handler)
     httpd.serve_forever()

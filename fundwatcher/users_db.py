@@ -1,7 +1,6 @@
 import os
 import sqlite3
 import time
-import json
 import secrets
 import hashlib
 
@@ -383,31 +382,6 @@ def list_user_ids(include_admin=True):
         return [int(x[0]) for x in c.fetchall()]
     finally:
         conn.close()
-
-
-def migrate_legacy_positions_from_fund_db(fund_db_path, admin_user_id):
-    try:
-        if not fund_db_path or not os.path.exists(fund_db_path):
-            return {"ok": True, "migrated": 0, "skipped": True}
-        conn_src = sqlite3.connect(fund_db_path)
-        try:
-            c = conn_src.cursor()
-            c.execute("SELECT code,fund_name,amount,earnings_yesterday,total_earnings,return_rate,notes,updated_at FROM user_positions_json")
-            rows = c.fetchall()
-        finally:
-            conn_src.close()
-        if not rows:
-            return {"ok": True, "migrated": 0}
-        existing = get_user_positions_json(admin_user_id) or []
-        if existing:
-            return {"ok": True, "migrated": 0, "skipped": True}
-        items = []
-        for cd, nm, amt, ey, te, rr, nt, ts in rows:
-            items.append({"code": cd, "fund_name": nm, "amount": amt, "earnings_yesterday": ey, "total_earnings": te, "return_rate": rr, "notes": nt})
-        upsert_user_positions_json(admin_user_id, items)
-        return {"ok": True, "migrated": len(items)}
-    except Exception:
-        return {"ok": False, "migrated": 0}
 
 
 def purge_non_admin_users():
