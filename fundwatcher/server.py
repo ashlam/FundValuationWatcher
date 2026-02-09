@@ -73,7 +73,7 @@ th,td{border-bottom:1px solid #eee;padding:8px;text-align:left;font-size:14px}
 </div>
 <div class="row">
 <span>持仓总金额：<strong id="sumAmount">-</strong><button id="toggleSumAmt" class="pbtn" type="button">隐私</button></span>
-<span style="margin-left:16px">当日盈亏总金额：<strong id="sumProfit">-</strong></span>
+<span style="margin-left:16px">当日盈亏总金额：<strong id="sumProfit">-</strong><button id="toggleSumProfitMode" class="pbtn" type="button">百分比</button></span>
 </div>
 <table>
 <thead><tr>
@@ -107,6 +107,7 @@ let sortAsc=true
 let hideAmount=false
 let hideTotalEarnings=false
 let hideSumAmount=false
+let showSumProfitPct=false
 const toggleSumAmtBtn=document.getElementById("toggleSumAmt")
 if(toggleSumAmtBtn){
   toggleSumAmtBtn.addEventListener("click", (e)=>{
@@ -114,6 +115,16 @@ if(toggleSumAmtBtn){
     hideSumAmount=!hideSumAmount
     toggleSumAmtBtn.className="pbtn"+(hideSumAmount?" on":"")
     toggleSumAmtBtn.textContent=hideSumAmount?"显示":"隐私"
+    render(lastItems)
+  })
+}
+const toggleSumProfitModeBtn=document.getElementById("toggleSumProfitMode")
+if(toggleSumProfitModeBtn){
+  toggleSumProfitModeBtn.addEventListener("click",(e)=>{
+    if(e){ e.stopPropagation() }
+    showSumProfitPct=!showSumProfitPct
+    toggleSumProfitModeBtn.className="pbtn"+(showSumProfitPct?" on":"")
+    toggleSumProfitModeBtn.textContent=showSumProfitPct?"金额":"百分比"
     render(lastItems)
   })
 }
@@ -255,7 +266,16 @@ function render(items){
     tbody.appendChild(tr)
   }
   if(sumAmountEl) sumAmountEl.textContent = hideSumAmount ? "****" : (sumAmt ? sumAmt.toFixed(2) : "0.00")
-  if(sumProfitEl) { sumProfitEl.textContent = (sumProfit>=0?"+":"") + (sumProfit ? sumProfit.toFixed(2) : "0.00"); sumProfitEl.className = (sumProfit>=0?"pos":"neg") }
+  if(sumProfitEl) {
+    if(showSumProfitPct && sumAmt>0){
+      const pct = (sumProfit/sumAmt)*100
+      const pctStr = isFinite(pct) ? ((pct>=0?"+":"")+pct.toFixed(2)+"%") : "0.00%"
+      sumProfitEl.textContent = pctStr
+    }else{
+      sumProfitEl.textContent = (sumProfit>=0?"+":"") + (sumProfit ? sumProfit.toFixed(2) : "0.00")
+    }
+    sumProfitEl.className = (sumProfit>=0?"pos":"neg")
+  }
 }
 async function load(){
   const raw=codesInput.value.trim()

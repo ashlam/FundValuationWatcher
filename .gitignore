@@ -1,0 +1,14 @@
+# User database files (store runtime data, do not track)
+fundwatcher/users.sqlite
+fundwatcher/users.sqlite-journal
+fundwatcher/users.sqlite-shm
+fundwatcher/users.sqlite-wal
+
+# Legacy/clean user DB file (keep only previously tracked clean version)
+fundwatcher/user.db
+fundwatcher/user.db-journal
+fundwatcher/user.db-shm
+fundwatcher/user.db-wal
+
+# macOS
+.DS_Store
