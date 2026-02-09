@@ -34,22 +34,23 @@ INDEX_HTML = """<!doctype html>
 <meta charset="utf-8">
 <title>基金实时估值</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;max-width:900px;margin:24px auto;padding:0 16px;color:#666}
-h1{font-size:22px;margin:0 0 12px;color:#666}
-.row{display:flex;gap:8px;margin:12px 0}
-input{flex:1;padding:8px 10px;border:1px solid #ccc;border-radius:6px;color:#666}
-button{padding:8px 12px;border:1px solid #1a73e8;background:#1a73e8;color:#fff;border-radius:6px}
-table{width:100%;border-collapse:collapse;margin-top:12px;color:#666}
-th,td{border-bottom:1px solid #eee;padding:8px;text-align:left;font-size:14px}
-.pos{color:#d93025}
-.neg{color:#0b8f2d}
-.navts{color:#1a73e8}
-.pbtn{padding:2px 6px;border:1px solid #ddd;background:#fff;color:#666;border-radius:999px;font-size:12px;margin-left:6px}
-.pbtn.on{border-color:#1a73e8;color:#1a73e8}
-.muted{color:#888}
-.nav{display:flex;gap:12px;padding:8px 0;border-bottom:1px solid #eee;margin-bottom:12px}
-.nav a{color:#1a73e8;text-decoration:none}
+        <style>
+        body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;max-width:900px;margin:24px auto;padding:0 16px;color:#666}
+        h1{font-size:22px;margin:0 0 12px;color:#666}
+        .row{display:flex;gap:8px;margin:12px 0}
+        input{flex:1;padding:8px 10px;border:1px solid #ccc;border-radius:6px;color:#666}
+        button{padding:8px 12px;border:1px solid #1a73e8;background:#1a73e8;color:#fff;border-radius:6px}
+        table{width:100%;border-collapse:collapse;margin-top:12px;color:#666}
+        th,td{border-bottom:1px solid #eee;padding:8px;text-align:left;font-size:14px}
+        .pos{color:#d93025}
+        .neg{color:#0b8f2d}
+        .navts{color:#1a73e8}
+        .jztoday{color:#0bb8c8}
+        .pbtn{padding:2px 6px;border:1px solid #ddd;background:#fff;color:#666;border-radius:999px;font-size:12px;margin-left:6px}
+        .pbtn.on{border-color:#1a73e8;color:#1a73e8}
+        .muted{color:#888}
+        .nav{display:flex;gap:12px;padding:8px 0;border-bottom:1px solid #eee;margin-bottom:12px}
+        .nav a{color:#1a73e8;text-decoration:none}
 </style>
 </head>
 <body>
@@ -259,15 +260,18 @@ function render(items){
   const rrStr = isFinite(rr) ? (rr>=0?"+"+rr.toFixed(2)+"%":rr.toFixed(2)+"%") : "-"
 
   const amtStr = hideAmount ? "****" : (amt?amt.toFixed(2):"")
-  const teShow = hideTotalEarnings ? "****" : teStr
-  const timeStr = (it.pct_source==="official" && it.nav_fetched_at) ? fmt(it.nav_fetched_at) : fmt(it.gztime)
-  const timeCls = (it.pct_source==="official" && it.nav_fetched_at) ? "navts" : ""
-  tr.innerHTML=`<td>${fmt(it.fundcode)}</td><td>${fmt(it.name)}</td><td>${amtStr}</td><td class="${cls}">${pct}%</td><td class="${todayProfit>=0?"pos":"neg"}">${amt?todayProfit.toFixed(2):""}</td><td class="${teCls}">${teShow}</td><td class="${rrCls}">${rrStr}</td><td>${fmt(it.jzrq)}</td><td class="${timeCls}">${timeStr}</td>`
-    tbody.appendChild(tr)
-  }
-  if(sumAmountEl) sumAmountEl.textContent = hideSumAmount ? "****" : (sumAmt ? sumAmt.toFixed(2) : "0.00")
-  if(sumProfitEl) {
-    if(showSumProfitPct && sumAmt>0){
+        const teShow = hideTotalEarnings ? "****" : teStr
+        const timeStr = (it.pct_source==="official" && it.nav_fetched_at) ? fmt(it.nav_fetched_at) : fmt(it.gztime)
+        const timeCls = (it.pct_source==="official" && it.nav_fetched_at) ? "navts" : ""
+        const todayStr = new Date().toISOString().slice(0,10)
+        const jzDate = (it.pct_source==="official" && it.daily_pct_date) ? it.daily_pct_date : it.jzrq
+        const jzCls = (String(jzDate||"")===todayStr) ? "jztoday" : ""
+        tr.innerHTML=`<td>${fmt(it.fundcode)}</td><td>${fmt(it.name)}</td><td>${amtStr}</td><td class="${cls}">${pct}%</td><td class="${todayProfit>=0?"pos":"neg"}">${amt?todayProfit.toFixed(2):""}</td><td class="${teCls}">${teShow}</td><td class="${rrCls}">${rrStr}</td><td class="${jzCls}">${fmt(jzDate)}</td><td class="${timeCls}">${timeStr}</td>`
+        tbody.appendChild(tr)
+      }
+      if(sumAmountEl) sumAmountEl.textContent = hideSumAmount ? "****" : (sumAmt ? sumAmt.toFixed(2) : "0.00")
+      if(sumProfitEl) {
+        if(showSumProfitPct && sumAmt>0){
       const pct = (sumProfit/sumAmt)*100
       const pctStr = isFinite(pct) ? ((pct>=0?"+":"")+pct.toFixed(2)+"%") : "0.00%"
       sumProfitEl.textContent = pctStr
@@ -1253,7 +1257,9 @@ document.getElementById("btn").addEventListener("click", async ()=>{
                 if est:
                     obj.update(est)
                 navc = fetch_latest_nav_change(code) if after_close else None
-                if navc and navc.get("pct") is not None:
+                today_str = now.date().isoformat()
+                use_official = navc and (navc.get("pct") is not None) and (navc.get("date") == today_str)
+                if use_official:
                     try:
                         obj["daily_pct"] = float(navc.get("pct"))
                     except Exception:
