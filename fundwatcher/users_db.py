@@ -384,10 +384,34 @@ def list_user_ids(include_admin=True):
         conn.close()
 
 
-def purge_non_admin_users():
+def count_users(*, include_admin=True):
     conn = _connect()
     try:
         c = conn.cursor()
+        if include_admin:
+            c.execute("SELECT COUNT(*) FROM users")
+        else:
+            c.execute("SELECT COUNT(*) FROM users WHERE username<>?", ("admin",))
+        return int((c.fetchone() or [0])[0] or 0)
+    finally:
+        conn.close()
+
+
+def clear_user_positions_daily(user_id):
+    conn = _connect()
+    try:
+        c = conn.cursor()
+        c.execute("DELETE FROM user_positions_daily WHERE user_id=?", (int(user_id),))
+        conn.commit()
+        return c.rowcount or 0
+    finally:
+        conn.close()
+
+
+
+def purge_non_admin_users():
+    conn = _connect()
+    try:
         c.execute("SELECT id FROM users WHERE username=?", ("admin",))
         row = c.fetchone()
         admin_id = int(row[0]) if row else None

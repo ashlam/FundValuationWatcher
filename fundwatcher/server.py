@@ -18,10 +18,12 @@ from .users_db import (
     create_user,
     delete_user,
     list_user_ids,
+    count_users,
     get_user_positions_json,
     upsert_user_positions_json,
     delete_user_position_json,
     clear_user_positions_json,
+    clear_user_positions_daily,
     upsert_user_positions_daily,
     get_user_positions_daily,
     sum_daily_profit_by_code,
@@ -62,7 +64,7 @@ INDEX_HTML = """<!doctype html>
 <span style="margin-left:auto" id="authLinks"></span>
 </div>
 <div class="row">
-<input id="codes" placeholder="输入基金代码，逗号分隔，如 110022,161039" />
+<input id="codes" placeholder="输入基金代码，逗号分隔" />
 <button id="refresh">刷新</button>
 </div>
 <div class="row">
@@ -312,7 +314,6 @@ window.addEventListener("load",async ()=>{
   await initAuthLinks()
   await initPortfolio()
   await initRefresh()
-  codesInput.value="110022,161039"
   load()
 })
 document.querySelectorAll("thead th").forEach(th=>{
@@ -457,9 +458,12 @@ th,td{border-bottom:1px solid #eee;padding:8px;text-align:left;font-size:14px}
 <span class="muted" id="status"></span>
 </div>
 <table>
-<thead><tr><th>代码</th><th>基金</th><th>金额</th><th>昨日收益</th><th>持有收益</th></tr></thead>
+<thead><tr><th style="width:40px"><input id="selectAll" type="checkbox" /></th><th>代码</th><th>基金</th><th>金额</th><th>昨日收益</th><th>持有收益</th></tr></thead>
 <tbody id="tbody"></tbody>
 </table>
+<div class="row" style="justify-content:flex-end">
+<button id="btnDeleteSelected" style="background:#b3261e;border-color:#b3261e">批量删除</button>
+</div>
 </div>
 <script>
 const statusEl=document.getElementById("status")
@@ -501,8 +505,42 @@ const addCode=document.getElementById("addCode")
 const addName=document.getElementById("addName")
 const addAmount=document.getElementById("addAmount")
 const btnLoadMyPortfolio=document.getElementById("btnLoadMyPortfolio")
+const btnDeleteSelected=document.getElementById("btnDeleteSelected")
+const selectAll=document.getElementById("selectAll")
+let selectedCodes = new Set()
 if(btnLoadMyPortfolio){
   btnLoadMyPortfolio.addEventListener("click", loadList)
+}
+if(selectAll){
+  selectAll.addEventListener("change", ()=>{
+    const checked = !!selectAll.checked
+    selectedCodes = new Set()
+    tbody.querySelectorAll("input.sel").forEach(cb=>{
+      cb.checked = checked
+      const code = cb.getAttribute("data-code") || ""
+      if(checked && code) selectedCodes.add(code)
+    })
+  })
+}
+if(btnDeleteSelected){
+  btnDeleteSelected.addEventListener("click", async ()=>{
+    const codes = Array.from(selectedCodes.values()).filter(Boolean)
+    if(codes.length===0){ alert("请先勾选要删除的持仓"); return }
+    if(!confirm("确定批量删除已勾选的 "+codes.length+" 条持仓吗？")) return
+    try{
+      const r = await fetch("/api/admin/portfolio/delete_batch", {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({codes})})
+      const j = await r.json()
+      if(r.ok && j.ok){
+        selectedCodes = new Set()
+        if(selectAll) selectAll.checked = false
+        loadList()
+      }else{
+        alert(j.error || "批量删除失败")
+      }
+    }catch(e){
+      alert("批量删除失败")
+    }
+  })
 }
 const addProfit=document.getElementById("addProfit")
 const addRate=document.getElementById("addRate")
@@ -514,50 +552,70 @@ function render(items){
     const tr=document.createElement("tr")
     const te=Number(it.total_earnings)
     const teCls = isFinite(te) ? (te>=0?"pos":"neg") : ""
-    tr.innerHTML=`<td>${it.code||""}</td><td>${it.fund_name||""}</td><td>${it.amount??""}</td><td>${it.earnings_yesterday??""}</td><td class="${teCls}">${it.total_earnings??""}</td>
+    const code = (it.code||"")
+    const checked = selectedCodes.has(code)
+    tr.innerHTML=`<td><input class="sel" type="checkbox" data-code="${code}" ${checked?"checked":""} /></td><td>${code}</td><td>${it.fund_name||""}</td><td>${it.amount??""}</td><td>${it.earnings_yesterday??""}</td><td class="${teCls}">${it.total_earnings??""}</td>
     <td>
       <button class="edit" data-code="${it.code||""}">修改</button>
       <button class="del" data-code="${it.code||""}">删除</button>
     </td>`
     tbody.appendChild(tr)
   }
+  for(const cb of tbody.querySelectorAll("input.sel")){
+    cb.addEventListener("change", ()=>{
+      const code = cb.getAttribute("data-code") || ""
+      if(!code) return
+      if(cb.checked) selectedCodes.add(code)
+      else selectedCodes.delete(code)
+      if(selectAll){
+        const all = Array.from(tbody.querySelectorAll("input.sel"))
+        selectAll.checked = (all.length>0 && all.every(x=>x.checked))
+      }
+    })
+  }
   for(const btn of tbody.querySelectorAll("button.edit")){
     btn.addEventListener("click",()=>{
       const code=btn.getAttribute("data-code")
       const tr=btn.closest("tr")
       const tds=tr.querySelectorAll("td")
+      const codeInput=document.createElement("input")
+      codeInput.value=tds[1].textContent||""
       const amtInput=document.createElement("input")
-      amtInput.value=tds[2].textContent||""
+      amtInput.value=tds[3].textContent||""
       const eyInput=document.createElement("input")
-      eyInput.value=tds[3].textContent||""
+      eyInput.value=tds[4].textContent||""
       const teInput=document.createElement("input")
-      teInput.value=tds[4].textContent||""
-      // const rrInput=document.createElement("input") // 移除持有收益率
-      // rrInput.value=tds[5].textContent||""
-      // const ntInput=document.createElement("input")
-      // ntInput.value=tds[5].textContent||"" // notes index changed
-      tds[2].innerHTML=""
-      tds[2].appendChild(amtInput)
+      teInput.value=tds[5].textContent||""
+      tds[1].innerHTML=""
+      tds[1].appendChild(codeInput)
       tds[3].innerHTML=""
-      tds[3].appendChild(eyInput)
+      tds[3].appendChild(amtInput)
       tds[4].innerHTML=""
-      tds[4].appendChild(teInput)
-      // tds[5].innerHTML=""
-      // tds[5].appendChild(rrInput)
-      // tds[5].innerHTML=""
-      // tds[5].appendChild(ntInput)
+      tds[4].appendChild(eyInput)
+      tds[5].innerHTML=""
+      tds[5].appendChild(teInput)
       btn.textContent="保存"
       btn.onclick=async ()=>{
         if(!code){ alert("请先补完基金编号"); return }
+        const newCode = codeInput.value.trim()
+        if(!newCode){ alert("基金代码不能为空"); return }
         const body=new URLSearchParams()
         body.set("code", code)
+        if(newCode && newCode!==code) body.set("new_code", newCode)
         if(amtInput.value.trim()) body.set("amount", amtInput.value.trim())
         if(eyInput.value.trim()) body.set("earnings_yesterday", eyInput.value.trim())
         if(teInput.value.trim()) body.set("total_earnings", teInput.value.trim())
-        // if(rrInput.value.trim()) body.set("return_rate", rrInput.value.trim())
-        // if(ntInput.value.trim()) body.set("notes", ntInput.value.trim())
-        await fetch("/api/admin/portfolio/update",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:body.toString()})
-        loadList()
+        try{
+          const r = await fetch("/api/admin/portfolio/update",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:body.toString()})
+          const j = await r.json()
+          if(r.ok && j.ok){
+            loadList()
+          }else{
+            alert(j.error || "保存失败")
+          }
+        }catch(e){
+          alert("保存失败")
+        }
       }
     })
   }
@@ -1003,6 +1061,11 @@ class Handler(BaseHTTPRequestHandler):
             cur = self._current_user()
             cur_user = (cur or {}).get("username") if cur else None
             cur_block = f"<div class='row'><span class='muted'>当前已登录：{cur_user}（如要切换用户，请先 <a href=\"/switch-user\">登出</a>）</span></div>" if cur_user else ""
+            try:
+                uc = count_users(include_admin=True)
+            except Exception:
+                uc = 0
+            cur_block = (cur_block or "") + f"<div class='row'><span class='muted'>当前注册用户数：{uc}</span></div>"
             html = """<!doctype html>
 <html>
 <head>
@@ -1611,14 +1674,59 @@ document.querySelectorAll("button.del").forEach(btn=>{
             if not code:
                 self._send_json({"error": "missing_code"}, status=400)
                 return
+            new_code = (kv.get("new_code") or [""])[0].strip()
             fund_name = (kv.get("fund_name") or [""])[0].strip()
             amt = (kv.get("amount") or [""])[0].strip()
             ey = (kv.get("earnings_yesterday") or [""])[0].strip()
             te = (kv.get("total_earnings") or [""])[0].strip()
             rr = (kv.get("return_rate") or [""])[0].strip()
             nt = (kv.get("notes") or [""])[0].strip()
-            items = [{"code": code, "fund_name": fund_name or None, "amount": float(amt) if amt else None, "earnings_yesterday": float(ey) if ey else None, "total_earnings": float(te) if te else None, "return_rate": float(rr) if rr else None, "notes": nt or None}]
-            upsert_user_positions_json(u.get("id"), items)
+
+            existing_items = get_user_positions_json(u.get("id")) or []
+            existing_map = {str(it.get("code") or "").strip(): it for it in existing_items}
+            cur = existing_map.get(code)
+            if not cur:
+                self._send_json({"ok": False, "error": "持仓不存在"}, status=404)
+                return
+
+            target_code = new_code or code
+            if target_code != code and existing_map.get(target_code):
+                self._send_json({"ok": False, "error": "该基金代码已存在持仓"}, status=400)
+                return
+
+            target_fund_name = None
+            if target_code != code:
+                prof = get_fund(target_code)
+                if not prof:
+                    self._send_json({"ok": False, "error": "基金代码不存在"}, status=400)
+                    return
+                target_fund_name = prof.get("name")
+            else:
+                target_fund_name = fund_name or cur.get("fund_name")
+                if not target_fund_name:
+                    prof = get_fund(target_code)
+                    if prof:
+                        target_fund_name = prof.get("name")
+
+            def _to_float_or_keep(raw, old):
+                raw = str(raw or "").strip()
+                if raw == "":
+                    return old
+                return float(raw)
+
+            payload = {
+                "code": target_code,
+                "fund_name": target_fund_name or None,
+                "amount": _to_float_or_keep(amt, cur.get("amount")),
+                "earnings_yesterday": _to_float_or_keep(ey, cur.get("earnings_yesterday")),
+                "total_earnings": _to_float_or_keep(te, cur.get("total_earnings")),
+                "return_rate": _to_float_or_keep(rr, cur.get("return_rate")),
+                "notes": (nt if nt != "" else cur.get("notes")) or None,
+            }
+
+            if target_code != code:
+                delete_user_position_json(u.get("id"), code)
+            upsert_user_positions_json(u.get("id"), [payload])
             self._send_json({"ok": True})
             return
         if p.path == "/api/admin/portfolio/delete":
@@ -1641,6 +1749,33 @@ document.querySelectorAll("button.del").forEach(btn=>{
                 return
             delete_user_position_json(u.get("id"), code)
             self._send_json({"ok": True})
+            return
+        if p.path == "/api/admin/portfolio/delete_batch":
+            u = self._require_login_api()
+            if not u:
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except Exception:
+                length = 0
+            body = self.rfile.read(length) if length > 0 else b""
+            codes = []
+            try:
+                j = json.loads(body.decode("utf-8", errors="ignore"))
+                if isinstance(j, dict):
+                    codes = j.get("codes") or []
+                elif isinstance(j, list):
+                    codes = j
+            except Exception:
+                codes = []
+            codes = [str(x or "").strip() for x in (codes or []) if str(x or "").strip()]
+            if not codes:
+                self._send_json({"ok": False, "error": "请选择要删除的持仓"}, status=400)
+                return
+            deleted = 0
+            for cd in codes:
+                deleted += int(delete_user_position_json(u.get("id"), cd) or 0)
+            self._send_json({"ok": True, "deleted": deleted})
             return
         if p.path == "/api/admin/portfolio/complete_codes":
             try:
