@@ -12,3 +12,7 @@ fundwatcher/user.db-wal
 
 # macOS
 .DS_Store
+
+# Python bytecode cache
+__pycache__/
+*.py[cod]
