@@ -303,7 +303,7 @@ async function initAuthLinks(){
       const uname=String(j.username||"")
       el.innerHTML = `<span class="muted">用户：${uname}</span> <a href="/switch-user">切换用户</a> <a href="/logout">登出</a>` + (j.is_super?` <a href="/admin/users">管理用户</a>`:"")
     }else{
-      el.innerHTML = `<a href="/login">登录</a>`
+      el.innerHTML = `<a href="/login">登录</a> <a href="/register">注册</a>`
     }
   }catch(e){}
 }
@@ -405,7 +405,7 @@ th,td{border-bottom:1px solid #eee;padding:8px;text-align:left;font-size:14px}
 </div>
 <div id="panelJson" class="panel">
 <div class="row">
-<textarea id="jsonText" rows="6">[{"fund_name":"易方达消费C","amount":1000.0,"earnings_yesterday":12.5,"total_earnings":123.4,"return_rate":1.25,"notes":"示例","code":"110022"}]</textarea>
+<textarea id="jsonText" rows="6">[{"fund_name":"易方达消费C","amount":1000.0,"total_earnings":123.4,"code":"110022"}]</textarea>
 </div>
 <div class="row">
 <input id="jsonFile" type="file" accept=".json,application/json" />
@@ -416,8 +416,8 @@ th,td{border-bottom:1px solid #eee;padding:8px;text-align:left;font-size:14px}
 </div>
 <div id="panelTsv" class="panel" style="display:none">
 <div class="row">
-<textarea id="tsvText" rows="6">fund_name\tamount\tearnings_yesterday\ttotal_earnings\treturn_rate\tnotes
-招商量化精选股票C\t4945.27\t-65.19\t235.27\t5.00\t定投</textarea>
+<textarea id="tsvText" rows="6">fund_name\tamount\ttotal_earnings
+招商量化精选股票C\t4945.27\t235.27</textarea>
 </div>
 <div class="row">
 <input id="tsvFile" type="file" accept=".tsv,text/tab-separated-values" />
@@ -427,8 +427,8 @@ th,td{border-bottom:1px solid #eee;padding:8px;text-align:left;font-size:14px}
 </div>
 <div id="panelCsv" class="panel" style="display:none">
 <div class="row">
-<textarea id="csvText" rows="6">fund_name,amount,earnings_yesterday,total_earnings,return_rate,notes
-招商量化精选股票C,4945.27,-65.19,235.27,5.00,定投</textarea>
+<textarea id="csvText" rows="6">fund_name,amount,total_earnings
+招商量化精选股票C,4945.27,235.27</textarea>
 </div>
 <div class="row">
 <input id="csvFile" type="file" accept=".csv,text/csv" />
@@ -445,8 +445,7 @@ th,td{border-bottom:1px solid #eee;padding:8px;text-align:left;font-size:14px}
 </div>
 <div class="row">
 <input id="addAmount" placeholder="持仓金额" />
-<input id="addProfit" placeholder="昨日收益金额" />
-<input id="addRate" placeholder="持有收益率(%)" />
+<input id="addRate" placeholder="持有收益金额" />
 </div>
 <div class="row">
 <button id="addItem">添加</button>
@@ -457,7 +456,7 @@ th,td{border-bottom:1px solid #eee;padding:8px;text-align:left;font-size:14px}
 <span class="muted" id="status"></span>
 </div>
 <table>
-<thead><tr><th>代码</th><th>基金</th><th>金额</th><th>昨日收益</th><th>持有收益</th></tr></thead>
+<thead><tr><th>代码</th><th>基金</th><th>金额</th><th>持有收益</th></tr></thead>
 <tbody id="tbody"></tbody>
 </table>
 </div>
@@ -474,7 +473,7 @@ async function initAuthLinks(){
       const uname=String(j.username||"")
       el.innerHTML = `<span class="muted">用户：${uname}</span> <a href="/switch-user">切换用户</a> <a href="/logout">登出</a>` + (j.is_super?` <a href="/admin/users">管理用户</a>`:"")
     }else{
-      el.innerHTML = `<a href="/login">登录</a>`
+      el.innerHTML = `<a href="/login">登录</a> <a href="/register">注册</a>`
     }
   }catch(e){}
 }
@@ -504,7 +503,6 @@ const btnLoadMyPortfolio=document.getElementById("btnLoadMyPortfolio")
 if(btnLoadMyPortfolio){
   btnLoadMyPortfolio.addEventListener("click", loadList)
 }
-const addProfit=document.getElementById("addProfit")
 const addRate=document.getElementById("addRate")
 const addItem=document.getElementById("addItem")
 // 已移除图片预览
@@ -514,7 +512,7 @@ function render(items){
     const tr=document.createElement("tr")
     const te=Number(it.total_earnings)
     const teCls = isFinite(te) ? (te>=0?"pos":"neg") : ""
-    tr.innerHTML=`<td>${it.code||""}</td><td>${it.fund_name||""}</td><td>${it.amount??""}</td><td>${it.earnings_yesterday??""}</td><td class="${teCls}">${it.total_earnings??""}</td>
+    tr.innerHTML=`<td>${it.code||""}</td><td>${it.fund_name||""}</td><td>${it.amount??""}</td><td class="${teCls}">${it.total_earnings??""}</td>
     <td>
       <button class="edit" data-code="${it.code||""}">修改</button>
       <button class="del" data-code="${it.code||""}">删除</button>
@@ -528,10 +526,8 @@ function render(items){
       const tds=tr.querySelectorAll("td")
       const amtInput=document.createElement("input")
       amtInput.value=tds[2].textContent||""
-      const eyInput=document.createElement("input")
-      eyInput.value=tds[3].textContent||""
       const teInput=document.createElement("input")
-      teInput.value=tds[4].textContent||""
+      teInput.value=tds[3].textContent||""
       // const rrInput=document.createElement("input") // 移除持有收益率
       // rrInput.value=tds[5].textContent||""
       // const ntInput=document.createElement("input")
@@ -539,9 +535,7 @@ function render(items){
       tds[2].innerHTML=""
       tds[2].appendChild(amtInput)
       tds[3].innerHTML=""
-      tds[3].appendChild(eyInput)
-      tds[4].innerHTML=""
-      tds[4].appendChild(teInput)
+      tds[3].appendChild(teInput)
       // tds[5].innerHTML=""
       // tds[5].appendChild(rrInput)
       // tds[5].innerHTML=""
@@ -552,7 +546,6 @@ function render(items){
         const body=new URLSearchParams()
         body.set("code", code)
         if(amtInput.value.trim()) body.set("amount", amtInput.value.trim())
-        if(eyInput.value.trim()) body.set("earnings_yesterday", eyInput.value.trim())
         if(teInput.value.trim()) body.set("total_earnings", teInput.value.trim())
         // if(rrInput.value.trim()) body.set("return_rate", rrInput.value.trim())
         // if(ntInput.value.trim()) body.set("notes", ntInput.value.trim())
@@ -603,10 +596,9 @@ addItem.addEventListener("click",async ()=>{
   body.set("code", c)
   body.set("fund_name", addName.value.trim())
   if(addAmount.value.trim()) body.set("amount", addAmount.value.trim())
-  if(addProfit.value.trim()) body.set("earnings_yesterday", addProfit.value.trim())
-  if(addRate.value.trim()) body.set("return_rate", addRate.value.trim())
+  if(addRate.value.trim()) body.set("total_earnings", addRate.value.trim())
   await fetch("/api/admin/portfolio/add",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:body.toString()})
-  addCode.value=""; addName.value=""; addAmount.value=""; addProfit.value=""; addRate.value="";
+  addCode.value=""; addName.value=""; addAmount.value=""; addRate.value="";
   loadList()
 })
 function showTab(name){
@@ -652,20 +644,14 @@ function parseDelimited(text, delim){
   const idx=(name)=>{const i=header.indexOf(name);return i>=0?i:null}
   const iFund=idx("fund_name")
   const iAmt=idx("amount")
-  const iEY=idx("earnings_yesterday")
   const iTE=idx("total_earnings")
-  const iRR=idx("return_rate")
-  const iNotes=idx("notes")
   const out=[]
   for(let k=1;k<lines.length;k++){
     const cols=lines[k].split(delim)
     const obj={
       fund_name: iFund!=null ? (cols[iFund]||"").trim() : "",
       amount: iAmt!=null ? Number((cols[iAmt]||"").trim()||0) : undefined,
-      earnings_yesterday: iEY!=null ? Number((cols[iEY]||"").trim()||0) : undefined,
       total_earnings: iTE!=null ? Number((cols[iTE]||"").trim()||0) : undefined,
-      return_rate: iRR!=null ? Number((cols[iRR]||"").trim()||0) : undefined,
-      notes: iNotes!=null ? (cols[iNotes]||"").trim() : undefined
     }
     if(obj.fund_name){ out.push(obj) }
   }
@@ -694,24 +680,37 @@ function parseCsv(text){
   const idx=(name)=>{const i=header.indexOf(name);return i>=0?i:null}
   const iFund=idx("fund_name")
   const iAmt=idx("amount")
-  const iEY=idx("earnings_yesterday")
   const iTE=idx("total_earnings")
-  const iRR=idx("return_rate")
-  const iNotes=idx("notes")
   const out=[]
   for(let k=1;k<lines.length;k++){
     const cols=parseLine(lines[k])
     const obj={
       fund_name: iFund!=null ? (cols[iFund]||"").trim() : "",
       amount: iAmt!=null ? Number((cols[iAmt]||"").trim()||0) : undefined,
-      earnings_yesterday: iEY!=null ? Number((cols[iEY]||"").trim()||0) : undefined,
       total_earnings: iTE!=null ? Number((cols[iTE]||"").trim()||0) : undefined,
-      return_rate: iRR!=null ? Number((cols[iRR]||"").trim()||0) : undefined,
-      notes: iNotes!=null ? (cols[iNotes]||"").trim() : undefined
     }
     if(obj.fund_name){ out.push(obj) }
   }
   return out
+}
+function toTsv(items){
+  const header=["code","fund_name","amount","total_earnings"]
+  const lines=[header.join(String.fromCharCode(9))]
+  for(const it of (items||[])){
+    const cols=[it.code||"", it.fund_name||"", (it.amount??""), (it.total_earnings??"")]
+    lines.push(cols.join(String.fromCharCode(9)))
+  }
+  return lines.join(String.fromCharCode(10))
+}
+function toCsv(items){
+  const esc=(s)=>('"'+String(s).split('"').join('""')+'"')
+  const header=["code","fund_name","amount","total_earnings"]
+  const lines=[header.join(",")]
+  for(const it of (items||[])){
+    const cols=[esc(it.code||""), esc(it.fund_name||""), esc(it.amount??""), esc(it.total_earnings??"")]
+    lines.push(cols.join(","))
+  }
+  return lines.join(String.fromCharCode(10))
 }
 function readFileText(input){
   return new Promise((resolve,reject)=>{
@@ -729,7 +728,8 @@ importTsvText.addEventListener("click",async ()=>{
     if(items.length===0){ statusEl.textContent="TSV 文本为空"; return }
     const r=await fetch("/api/admin/portfolio/json",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(items)})
     const j=await r.json()
-    statusEl.textContent=`TSV 导入 ${j.count||0} 条`
+    const nf=(j.not_found||[])
+    statusEl.textContent=`TSV 导入 ${j.count||0} 条${nf.length?`；未找到：${nf.join("、")}`:""}`
     loadList()
   }catch(e){
     statusEl.textContent="TSV 文本导入失败"
@@ -742,7 +742,8 @@ importTsvFile.addEventListener("click",async ()=>{
     if(items.length===0){ statusEl.textContent="TSV 内容为空"; return }
     const r=await fetch("/api/admin/portfolio/json",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(items)})
     const j=await r.json()
-    statusEl.textContent=`TSV 导入 ${j.count||0} 条`
+    const nf=(j.not_found||[])
+    statusEl.textContent=`TSV 导入 ${j.count||0} 条${nf.length?`；未找到：${nf.join("、")}`:""}`
     loadList()
   }catch(e){
     statusEl.textContent="TSV 导入失败"
@@ -754,7 +755,8 @@ importCsvText.addEventListener("click",async ()=>{
     if(items.length===0){ statusEl.textContent="CSV 文本为空"; return }
     const r=await fetch("/api/admin/portfolio/json",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(items)})
     const j=await r.json()
-    statusEl.textContent=`CSV 导入 ${j.count||0} 条`
+    const nf=(j.not_found||[])
+    statusEl.textContent=`CSV 导入 ${j.count||0} 条${nf.length?`；未找到：${nf.join("、")}`:""}`
     loadList()
   }catch(e){
     statusEl.textContent="CSV 文本导入失败"
@@ -767,7 +769,8 @@ importCsvFile.addEventListener("click",async ()=>{
     if(items.length===0){ statusEl.textContent="CSV 内容为空"; return }
     const r=await fetch("/api/admin/portfolio/json",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(items)})
     const j=await r.json()
-    statusEl.textContent=`CSV 导入 ${j.count||0} 条`
+    const nf=(j.not_found||[])
+    statusEl.textContent=`CSV 导入 ${j.count||0} 条${nf.length?`；未找到：${nf.join("、")}`:""}`
     loadList()
   }catch(e){
     statusEl.textContent="CSV 导入失败"
@@ -781,6 +784,37 @@ completeCodes.addEventListener("click",async ()=>{
   const j=await r.json()
   if(j.items){
     jsonText.value=JSON.stringify(j.items, null, 2)
+    const nf=(j.not_found||[])
+    statusEl.textContent=`已补完 ${j.completed||0} 条基金代码${nf.length?`；未找到：${nf.join("、")}`:""}`
+  }else{
+    statusEl.textContent="未能补完基金代码"
+  }
+})
+// TSV/CSV 补完基金编号
+document.getElementById("panelTsv").insertAdjacentHTML("beforeend", `<div class="row"><button id="completeTsv">补完基金编号</button></div>`)
+document.getElementById("panelCsv").insertAdjacentHTML("beforeend", `<div class="row"><button id="completeCsv">补完基金编号</button></div>`)
+const completeTsv=document.getElementById("completeTsv")
+const completeCsv=document.getElementById("completeCsv")
+completeTsv.addEventListener("click", async ()=>{
+  const items=parseDelimited(tsvText.value||"", String.fromCharCode(9))
+  if(items.length===0){ statusEl.textContent="TSV 文本为空"; return }
+  const r=await fetch("/api/admin/portfolio/complete_codes",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(items)})
+  const j=await r.json()
+  if(j.items){
+    tsvText.value = toTsv(j.items)
+    const nf=(j.not_found||[])
+    statusEl.textContent=`已补完 ${j.completed||0} 条基金代码${nf.length?`；未找到：${nf.join("、")}`:""}`
+  }else{
+    statusEl.textContent="未能补完基金代码"
+  }
+})
+completeCsv.addEventListener("click", async ()=>{
+  const items=parseCsv(csvText.value||"")
+  if(items.length===0){ statusEl.textContent="CSV 文本为空"; return }
+  const r=await fetch("/api/admin/portfolio/complete_codes",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(items)})
+  const j=await r.json()
+  if(j.items){
+    csvText.value = toCsv(j.items)
     const nf=(j.not_found||[])
     statusEl.textContent=`已补完 ${j.completed||0} 条基金代码${nf.length?`；未找到：${nf.join("、")}`:""}`
   }else{
@@ -1027,6 +1061,7 @@ a{color:#1a73e8;text-decoration:none}
 <div class="row"><button id="btn">登录</button></div>
 <div class="row"><span id="msg" class="muted"></span></div>
 <div class="row"><span class="muted">默认超级用户：admin/admin</span></div>
+<div class="row"><span class="muted">没有账号？<a id="regLink">去注册</a></span></div>
 <script>
 const nextUrl=%s
 document.getElementById("btn").addEventListener("click", async ()=>{
@@ -1049,6 +1084,74 @@ document.getElementById("btn").addEventListener("click", async ()=>{
     msg.textContent="登录失败"
   }
 })
+const regLink=document.getElementById("regLink")
+if(regLink){
+  const q=encodeURIComponent(nextUrl||"/")
+  regLink.setAttribute("href","/register?next="+q)
+}
+</script>
+</body>
+</html>
+""" % (cur_block, json.dumps(nxt))
+            self._send_html(html)
+            return
+        if p.path == "/register":
+            q = parse_qs(p.query or "")
+            nxt = unquote((q.get("next") or ["/"])[0] or "/")
+            cur = self._current_user()
+            cur_user = (cur or {}).get("username") if cur else None
+            cur_block = f"<div class='row'><span class='muted'>当前已登录：{cur_user}（如要切换用户，请先 <a href=\"/switch-user\">登出</a>）</span></div>" if cur_user else ""
+            html = """<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>注册</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;max-width:720px;margin:24px auto;padding:0 16px;color:#666}
+h1{font-size:22px;margin:0 0 12px;color:#666}
+.row{display:flex;gap:8px;margin:12px 0}
+input{flex:1;padding:8px 10px;border:1px solid #ccc;border-radius:6px;color:#666}
+button{padding:8px 12px;border:1px solid #1a73e8;background:#1a73e8;color:#fff;border-radius:6px}
+.muted{color:#888}
+a{color:#1a73e8;text-decoration:none}
+</style>
+</head>
+<body>
+<h1>注册</h1>
+%s
+<div class="row"><input id="u" placeholder="用户名" /></div>
+<div class="row"><input id="p" placeholder="密码" type="password" /></div>
+<div class="row"><button id="btn">注册</button></div>
+<div class="row"><span id="msg" class="muted"></span></div>
+<div class="row"><span class="muted">已有账号？<a id="loginLink">去登录</a></span></div>
+<script>
+const nextUrl=%s
+document.getElementById("btn").addEventListener("click", async ()=>{
+  const u=document.getElementById("u").value.trim()
+  const p=document.getElementById("p").value
+  const msg=document.getElementById("msg")
+  if(!u||!p){ msg.textContent="请输入用户名和密码"; return }
+  try{
+    const body=new URLSearchParams()
+    body.set("username", u)
+    body.set("password", p)
+    const r=await fetch("/api/register",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:body.toString()})
+    const j=await r.json()
+    if(r.status===200 && j.ok){
+      location.href=nextUrl||"/"
+    }else{
+      msg.textContent=j.error||"注册失败"
+    }
+  }catch(e){
+    msg.textContent="注册失败"
+  }
+})
+const loginLink=document.getElementById("loginLink")
+if(loginLink){
+  const q=encodeURIComponent(nextUrl||"/")
+  loginLink.setAttribute("href","/login?next="+q)
+}
 </script>
 </body>
 </html>
@@ -1435,6 +1538,34 @@ document.querySelectorAll("button.del").forEach(btn=>{
             tok = create_session(u.get("id"))
             self._send_json({"ok": True, "username": u.get("username"), "is_super": bool(u.get("is_super"))}, extra_headers={"Set-Cookie": self._set_session_cookie_header(tok)})
             return
+        if p.path == "/api/register":
+            ck = self._parse_cookies()
+            old_tok = ck.get("fw_session")
+            if old_tok:
+                delete_session(old_tok)
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except Exception:
+                length = 0
+            body = self.rfile.read(length) if length > 0 else b""
+            kv = {}
+            try:
+                kv = parse_qs(body.decode("utf-8", errors="ignore"))
+            except Exception:
+                kv = {}
+            username = (kv.get("username") or [""])[0].strip()
+            password = (kv.get("password") or [""])[0]
+            if not username or not password:
+                self._send_json({"ok": False, "error": "missing_username_or_password"}, status=400)
+                return
+            try:
+                uid = create_user(username, password, is_super=False)
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, status=400)
+                return
+            tok = create_session(uid)
+            self._send_json({"ok": True, "username": username, "is_super": False}, extra_headers={"Set-Cookie": self._set_session_cookie_header(tok)})
+            return
         if p.path == "/api/super/users/add":
             u = self._require_login_api()
             if not u:
@@ -1544,22 +1675,28 @@ document.querySelectorAll("button.del").forEach(btn=>{
             except Exception:
                 items = []
             filled = []
+            not_found = []
             for it in items:
-                code = str(it.get("code") or "").strip()
-                fund_name = (it.get("fund_name") or "").strip()
-                if not code:
-                    c2 = find_fund_code_by_name(fund_name)
-                    if c2:
-                        code = c2
-                if not code and fund_name:
-                    code = "NOCODE:" + fund_name
-                if not code:
+                try:
+                    code = str(it.get("code") or "").strip()
+                    fund_name = (it.get("fund_name") or it.get("name") or "").strip()
+                    if not code:
+                        c2 = find_fund_code_by_name(fund_name)
+                        if c2:
+                            code = c2
+                        elif fund_name:
+                            not_found.append(fund_name)
+                    if not code and fund_name:
+                        code = "NOCODE:" + fund_name
+                    if not code:
+                        continue
+                    filled.append({"code": code, "fund_name": fund_name, "amount": it.get("amount"), "earnings_yesterday": it.get("earnings_yesterday"), "total_earnings": it.get("total_earnings"), "return_rate": it.get("return_rate"), "notes": it.get("notes")})
+                except Exception:
                     continue
-                filled.append({"code": code, "fund_name": fund_name, "amount": it.get("amount"), "earnings_yesterday": it.get("earnings_yesterday"), "total_earnings": it.get("total_earnings"), "return_rate": it.get("return_rate"), "notes": it.get("notes")})
             commit = ((parse_qs(p.query or "").get("commit") or ["1"])[0].strip().lower() in ("1","true","yes"))
             if filled and commit:
                 upsert_user_positions_json(u.get("id"), filled)
-            self._send_json({"ok": True, "count": len(filled), "items": filled, "committed": bool(filled and commit)})
+            self._send_json({"ok": True, "count": len(filled), "items": filled, "committed": bool(filled and commit), "not_found": not_found})
             return
         if p.path == "/api/admin/portfolio/add":
             u = self._require_login_api()
