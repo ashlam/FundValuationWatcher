@@ -175,6 +175,38 @@ def fetch_latest_nav_change(code, timeout=6):
         dt = None
     return {"date": dt, "nav": nav, "pct": pct} if (pct is not None) else None
 
+def fetch_nav_change_series(code, timeout=8):
+    url = f"http://fund.eastmoney.com/pingzhongdata/{code}.js"
+    req = Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            text = resp.read().decode("utf-8", errors="ignore")
+    except (HTTPError, URLError):
+        return None
+    m = re.search(r"var\s+Data_netWorthTrend\s*=\s*([^;]+);", text)
+    if not m:
+        return None
+    try:
+        arr = json.loads(m.group(1))
+    except Exception:
+        return None
+    out = []
+    for it in arr or []:
+        try:
+            x = it.get("x")
+            if isinstance(x, (int, float)):
+                import datetime as _dt
+                dt = _dt.datetime.fromtimestamp(x/1000.0).date().isoformat()
+            else:
+                dt = None
+            pct = float(it.get("equityReturn")) if it.get("equityReturn") is not None else None
+            nav = float(it.get("y")) if it.get("y") is not None else None
+            if dt is not None and pct is not None:
+                out.append({"date": dt, "pct": pct, "nav": nav})
+        except Exception:
+            continue
+    return out or None
+
 def fetch_fundcode_search(timeout=8) -> Optional[List[Dict[str, str]]]:
     url = "http://fund.eastmoney.com/js/fundcode_search.js"
     req = Request(url, headers={"User-Agent": "Mozilla/5.0"})

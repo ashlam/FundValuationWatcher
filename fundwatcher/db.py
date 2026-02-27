@@ -97,16 +97,31 @@ def find_fund_code_by_name(name):
         return None
     def _norm(s):
         s = (s or "").strip()
+        s = s.replace("连接", "联接")
         s = s.replace("发起式联接", "联接")
         s = s.replace("发起联接", "联接")
         s = s.replace("发起式", "")
         s = s.replace("发起", "")
+        s = s.replace("指数基金", "指数")
         s = s.replace("成份指数", "指数")
+        s = s.replace("交易型开放式指数基金", "ETF")
+        s = s.replace("（LOF）", "").replace("(LOF)", "")
+        s = s.replace("LOF", "")
+        s = s.replace("ETF联接", "联接")
+        s = s.replace("ETF", "")
+        s = s.replace("基金", "")
+        s = s.replace("型", "")
         s = s.replace("中证全指证券公司", "证券")
         s = s.replace("（", "(").replace("）", ")")
         s = s.replace(" ", "")
         return s
     qn = _norm(name)
+    suf = ""
+    tname = (name or "").strip()
+    if tname:
+        x = tname[-1:]
+        if x in ("A", "B", "C", "I", "E"):
+            suf = x
     conn = _connect()
     try:
         c = conn.cursor()
@@ -118,22 +133,53 @@ def find_fund_code_by_name(name):
         for code, nm in rows:
             if qn == _norm(nm):
                 return code
-        for code, nm in rows:
-            nn = _norm(nm)
-            if qn and (qn in nn or nn in qn):
-                if nm and name and nm[:2] == name[:2]:
-                    return code
         try:
             import difflib
-            best = None
-            best_ratio = 0.0
+            bc = None
+            bs = 0.0
             for code, nm in rows:
-                ratio = difflib.SequenceMatcher(a=qn, b=_norm(nm)).ratio()
-                if ratio > best_ratio and nm[:2] == name[:2]:
-                    best_ratio = ratio
-                    best = code
-            if best_ratio >= 0.82:
-                return best
+                nn = _norm(nm)
+                r = difflib.SequenceMatcher(a=qn, b=nn).ratio()
+                b = 0.0
+                if nm[:2] == name[:2]:
+                    b += 0.03
+                if suf and (nm.strip()[-1:] == suf):
+                    b += 0.05
+                if qn and (qn in nn or nn in qn):
+                    b += 0.07
+                sc = r + b
+                if sc > bs:
+                    bs = sc
+                    bc = code
+            if bs >= 0.82:
+                return bc
+        except Exception:
+            pass
+        try:
+            from .eastmoney import fetch_fundcode_search
+            items = fetch_fundcode_search()
+            if items:
+                import difflib as _df
+                bc = None
+                bs = 0.0
+                for it in items:
+                    code = it.get("code")
+                    nm = it.get("name") or ""
+                    nn = _norm(nm)
+                    r = _df.SequenceMatcher(a=qn, b=nn).ratio()
+                    b = 0.0
+                    if nm[:2] == name[:2]:
+                        b += 0.03
+                    if suf and (nm.strip()[-1:] == suf):
+                        b += 0.05
+                    if qn and (qn in nn or nn in qn):
+                        b += 0.07
+                    sc = r + b
+                    if sc > bs:
+                        bs = sc
+                        bc = code
+                if bs >= 0.82:
+                    return bc
         except Exception:
             pass
         return None

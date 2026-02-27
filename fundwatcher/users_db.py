@@ -370,6 +370,20 @@ def sum_daily_profit_by_code(user_id, date):
     finally:
         conn.close()
 
+def sum_all_profit_by_code(user_id):
+    conn = _connect()
+    try:
+        c = conn.cursor()
+        c.execute(
+            "SELECT code, SUM(profit) FROM user_positions_daily WHERE user_id=? GROUP BY code",
+            (int(user_id),),
+        )
+        mp = {}
+        for cd, sm in c.fetchall():
+            mp[str(cd)] = float(sm or 0.0)
+        return mp
+    finally:
+        conn.close()
 
 def list_user_ids(include_admin=True):
     conn = _connect()

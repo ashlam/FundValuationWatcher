@@ -6,7 +6,7 @@ import datetime
 import secrets
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, quote, unquote
-from .eastmoney import fetch_fund_estimation, fetch_fund_profile, fetch_fundcode_search, fetch_latest_nav_change
+from .eastmoney import fetch_fund_estimation, fetch_fund_profile, fetch_fundcode_search, fetch_latest_nav_change, fetch_nav_change_series
 from .db import init_db, get_fund, upsert_fund_profile, upsert_asset_allocations, get_stats, find_fund_code_by_name
 from .users_db import (
     init_users_db,
@@ -27,6 +27,7 @@ from .users_db import (
     upsert_user_positions_daily,
     get_user_positions_daily,
     sum_daily_profit_by_code,
+    sum_all_profit_by_code,
 )
 from .akshare import fetch_all_funds_basic, fetch_fund_detail_xq
 
@@ -398,6 +399,11 @@ th,td{border-bottom:1px solid #eee;padding:8px;text-align:left;font-size:14px}
 <div class="row">
 <button id="btnLoadMyPortfolio">我的持仓</button>
 </div>
+<div class="row">
+<input id="backfillStart" placeholder="起始日期 YYYY-MM-DD（可选）" />
+<input id="backfillEnd" placeholder="结束日期 YYYY-MM-DD（可选）" />
+<button id="btnBackfill">一键历史回填</button>
+</div>
 <div>
 <div class="tabs">
 <button id="tabJson" class="tab active">导入 JSON</button>
@@ -457,7 +463,7 @@ th,td{border-bottom:1px solid #eee;padding:8px;text-align:left;font-size:14px}
 <span class="muted" id="status"></span>
 </div>
 <table>
-<thead><tr><th style="width:40px"><input id="selectAll" type="checkbox" /></th><th>代码</th><th>基金</th><th>金额</th><th>持有收益</th></tr></thead>
+<thead><tr><th style="width:40px"><input id="selectAll" type="checkbox" /></th><th>代码</th><th>基金</th><th>金额</th><th>持有收益</th><th>更新日期</th></tr></thead>
 <tbody id="tbody"></tbody>
 </table>
 <div class="row" style="justify-content:flex-end">
@@ -467,6 +473,14 @@ th,td{border-bottom:1px solid #eee;padding:8px;text-align:left;font-size:14px}
 <script>
 const statusEl=document.getElementById("status")
 const tbody=document.getElementById("tbody")
+function fmtTs(ts){
+  if(ts===undefined||ts===null) return ""
+  const n=Number(ts)
+  if(!isFinite(n)||n<=0) return ""
+  const d=new Date(n*1000)
+  const pad=(x)=>String(x).padStart(2,"0")
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
 async function initAuthLinks(){
   const el=document.getElementById("authLinks")
   if(!el) return
@@ -504,11 +518,36 @@ const addCode=document.getElementById("addCode")
 const addName=document.getElementById("addName")
 const addAmount=document.getElementById("addAmount")
 const btnLoadMyPortfolio=document.getElementById("btnLoadMyPortfolio")
+const backfillStart=document.getElementById("backfillStart")
+const backfillEnd=document.getElementById("backfillEnd")
+const btnBackfill=document.getElementById("btnBackfill")
 const btnDeleteSelected=document.getElementById("btnDeleteSelected")
 const selectAll=document.getElementById("selectAll")
 let selectedCodes = new Set()
 if(btnLoadMyPortfolio){
   btnLoadMyPortfolio.addEventListener("click", loadList)
+}
+if(btnBackfill){
+  btnBackfill.addEventListener("click", async ()=>{
+    const s=String(backfillStart.value||"").trim()
+    const e=String(backfillEnd.value||"").trim()
+    const q=new URLSearchParams()
+    if(s) q.set("start_date", s)
+    if(e) q.set("end_date", e)
+    statusEl.textContent="正在回填..."
+    try{
+      const r=await fetch("/api/admin/settlement/backfill?"+q.toString(),{cache:"no-store"})
+      const j=await r.json()
+      if(r.ok && j.ok){
+        statusEl.textContent=`已回填 ${j.backfilled_days||0} 天，写入 ${j.written||0} 条；已重算 ${j.recomputed||0} 条累计收益`
+        loadList()
+      }else{
+        statusEl.textContent=j.error||"回填失败"
+      }
+    }catch(e){
+      statusEl.textContent="回填失败"
+    }
+  })
 }
 if(selectAll){
   selectAll.addEventListener("change", ()=>{
@@ -552,7 +591,11 @@ function render(items){
     const teCls = isFinite(te) ? (te>=0?"pos":"neg") : ""
     const code = (it.code||"")
     const checked = selectedCodes.has(code)
-    tr.innerHTML=`<td><input class="sel" type="checkbox" data-code="${code}" ${checked?"checked":""} /></td><td>${code}</td><td>${it.fund_name||""}</td><td>${it.amount??""}</td><td class="${teCls}">${it.total_earnings??""}</td>
+    tr.setAttribute("data-code", code)
+    tr.setAttribute("data-amount", String(it.amount??""))
+    tr.setAttribute("data-total-earnings", String(it.total_earnings??""))
+    tr.setAttribute("data-fund-name", String(it.fund_name||""))
+    tr.innerHTML=`<td><input class="sel" type="checkbox" data-code="${code}" ${checked?"checked":""} /></td><td>${code}</td><td>${it.fund_name||""}</td><td>${it.amount??""}</td><td class="${teCls}">${it.total_earnings??""}</td><td>${fmtTs(it.updated_at)}</td>
     <td>
       <button class="edit" data-code="${it.code||""}">修改</button>
       <button class="del" data-code="${it.code||""}">删除</button>
@@ -572,43 +615,72 @@ function render(items){
     })
   }
   for(const btn of tbody.querySelectorAll("button.edit")){
-    btn.addEventListener("click",()=>{
-      const code=btn.getAttribute("data-code")
+    btn.addEventListener("click", async ()=>{
       const tr=btn.closest("tr")
       const tds=tr.querySelectorAll("td")
-      const codeInput=document.createElement("input")
-      codeInput.value=tds[1].textContent||""
-      const amtInput=document.createElement("input")
-      amtInput.value=tds[3].textContent||""
-      const teInput=document.createElement("input")
-      teInput.value=tds[4].textContent||""
-      tds[1].innerHTML=""
-      tds[1].appendChild(codeInput)
-      tds[3].innerHTML=""
-      tds[3].appendChild(amtInput)
-      tds[4].innerHTML=""
-      tds[4].appendChild(teInput)
-      btn.textContent="保存"
-      btn.onclick=async ()=>{
-        if(!code){ alert("请先补完基金编号"); return }
-        const newCode = codeInput.value.trim()
-        if(!newCode){ alert("基金代码不能为空"); return }
-        const body=new URLSearchParams()
-        body.set("code", code)
-        if(newCode && newCode!==code) body.set("new_code", newCode)
-        if(amtInput.value.trim()) body.set("amount", amtInput.value.trim())
-        if(teInput.value.trim()) body.set("total_earnings", teInput.value.trim())
-        try{
-          const r = await fetch("/api/admin/portfolio/update",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:body.toString()})
-          const j = await r.json()
-          if(r.ok && j.ok){
-            loadList()
-          }else{
-            alert(j.error || "保存失败")
-          }
-        }catch(e){
-          alert("保存失败")
+      const codeAttr = (tr.getAttribute("data-code") || (tds[1]?.textContent||"")).trim()
+      if(btn.textContent==="修改"){
+        const codeInput=document.createElement("input")
+        codeInput.value=codeAttr||""
+        codeInput.className="code-input"
+        codeInput.readOnly=true
+        const amtInput=document.createElement("input")
+        amtInput.value=tr.getAttribute("data-amount")||tds[3].textContent||""
+        amtInput.className="amt-input"
+        amtInput.type="number"
+        amtInput.step="any"
+        const teInput=document.createElement("input")
+        teInput.value=tr.getAttribute("data-total-earnings")||tds[4].textContent||""
+        teInput.className="te-input"
+        teInput.type="number"
+        teInput.step="any"
+        tds[1].innerHTML=""
+        tds[1].appendChild(codeInput)
+        tds[3].innerHTML=""
+        tds[3].appendChild(amtInput)
+        tds[4].innerHTML=""
+        tds[4].appendChild(teInput)
+        btn.textContent="保存"
+        const actionTd = tds[6]
+        const cancelBtn = document.createElement("button")
+        cancelBtn.className = "cancel"
+        cancelBtn.textContent = "取消"
+        actionTd.appendChild(cancelBtn)
+        cancelBtn.addEventListener("click", ()=>{
+          tds[1].textContent = codeAttr||""
+          tds[3].textContent = tr.getAttribute("data-amount")||""
+          tds[4].textContent = tr.getAttribute("data-total-earnings")||""
+          btn.textContent = "修改"
+          cancelBtn.remove()
+        })
+        return
+      }
+      const codeEl = tr.querySelector("input.code-input")
+      const amtEl = tr.querySelector("input.amt-input")
+      const teEl = tr.querySelector("input.te-input")
+      const curCode = codeAttr
+      if(!curCode){ alert("请先补完基金编号"); return }
+      const newCode = ((codeEl && codeEl.value)||"").trim() || curCode
+      if(!newCode){ alert("基金代码不能为空"); return }
+      const amtVal = ((amtEl && amtEl.value)||"").trim()
+      const teVal = ((teEl && teEl.value)||"").trim()
+      const body=new URLSearchParams()
+      body.set("code", curCode)
+      if(newCode && newCode!==curCode) body.set("new_code", newCode)
+      if(amtVal!=="") body.set("amount", amtVal)
+      if(teVal!=="") body.set("total_earnings", teVal)
+      
+      try{
+        const r = await fetch("/api/admin/portfolio/update",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:body.toString()})
+        const j = await r.json()
+        if(r.ok && j.ok){
+          if(statusEl){ statusEl.textContent = "已保存"; setTimeout(()=>{ if(statusEl.textContent==="已保存") statusEl.textContent=""; }, 2000) }
+          loadList()
+        }else{
+          alert(j.error || "保存失败")
         }
+      }catch(e){
+        alert("保存失败")
       }
     })
   }
@@ -1371,6 +1443,16 @@ if(loginLink){
             items = get_user_positions_daily(u.get("id"), d if d else None)
             self._send_json({"items": items})
             return
+        if p.path == "/api/admin/settlement/backfill":
+            u = self._require_login_api()
+            if not u:
+                return
+            q = parse_qs(p.query or "")
+            sd = (q.get("start_date") or [""])[0].strip()
+            ed = (q.get("end_date") or [""])[0].strip()
+            r = backfill_positions_for_user(u.get("id"), sd or None, ed or None)
+            self._send_json(r)
+            return
         if p.path == "/api/admin/settlement/recompute":
             u = self._require_login_api()
             if not u:
@@ -1818,6 +1900,7 @@ document.querySelectorAll("button.del").forEach(btn=>{
             te = (kv.get("total_earnings") or [""])[0].strip()
             rr = (kv.get("return_rate") or [""])[0].strip()
             nt = (kv.get("notes") or [""])[0].strip()
+            
 
             existing_items = get_user_positions_json(u.get("id")) or []
             existing_map = {str(it.get("code") or "").strip(): it for it in existing_items}
@@ -1860,6 +1943,7 @@ document.querySelectorAll("button.del").forEach(btn=>{
                 "return_rate": _to_float_or_keep(rr, cur.get("return_rate")),
                 "notes": (nt if nt != "" else cur.get("notes")) or None,
             }
+            
 
             if target_code != code:
                 delete_user_position_json(u.get("id"), code)
@@ -2038,7 +2122,13 @@ def settle_positions(time_slot="close", do_rollup=False):
                 if not est:
                     continue
                 pct = float(est.get("gszzl") or 0) if est.get("gszzl") is not None else 0.0
-            prof = amt * pct / 100.0 if amt and pct else 0.0
+            total_prev = it.get("total_earnings")
+            try:
+                total_prev = float(total_prev) if total_prev is not None else 0.0
+            except Exception:
+                total_prev = 0.0
+            cur_val = (amt or 0.0) + total_prev
+            prof = cur_val * pct / 100.0 if cur_val and pct else 0.0
             obj = get_fund(code) or {}
             name = obj.get("name")
             daily_batch.append({
@@ -2098,6 +2188,101 @@ def get_settlement_status():
     ts = _last_settlement_info.get("ts")
     return {"ok": True, "last_date": d, "last_ts": ts}
 
+def backfill_positions_for_user(user_id, start_date=None, end_date=None):
+    user_id = int(user_id)
+    now = datetime.datetime.now().date()
+    if end_date:
+        try:
+            end = datetime.datetime.strptime(end_date, "%Y-%m-%d").date()
+        except Exception:
+            end = now
+    else:
+        end = now
+    items = get_user_positions_json(user_id) or []
+    if not items:
+        return {"ok": True, "backfilled_days": 0, "written": 0, "recomputed": 0}
+    series_cache = {}
+    def _date_from_ts(ts):
+        try:
+            return datetime.datetime.fromtimestamp(int(ts)).date()
+        except Exception:
+            return now
+    day_map = {}
+    total_written = 0
+    for it in items:
+        code = str(it.get("code") or "").strip()
+        if not code or code.startswith("NOCODE:"):
+            continue
+        amt = float(it.get("amount") or 0) or 0.0
+        if amt == 0.0:
+            continue
+        if code not in series_cache:
+            series_cache[code] = fetch_nav_change_series(code) or []
+        ser = series_cache.get(code) or []
+        pct_by_date = {}
+        for rec in ser:
+            d = rec.get("date")
+            if d:
+                pct_by_date[d] = rec.get("pct")
+        start_dt = _date_from_ts(it.get("updated_at"))
+        if start_date:
+            try:
+                s2 = datetime.datetime.strptime(start_date, "%Y-%m-%d").date()
+                start_dt = s2
+            except Exception:
+                pass
+        cur = start_dt
+        last_available = None
+        if ser:
+            try:
+                last_available = datetime.datetime.strptime(ser[-1].get("date"), "%Y-%m-%d").date()
+            except Exception:
+                last_available = None
+        target_end = end
+        if last_available and last_available < target_end:
+            target_end = last_available
+        cur_val = amt
+        while cur <= target_end:
+            ds = cur.isoformat()
+            pct = pct_by_date.get(ds)
+            if pct is None:
+                cur = cur + datetime.timedelta(days=1)
+                continue
+            prof = cur_val * float(pct) / 100.0
+            cur_val = cur_val + prof
+            obj = get_fund(code) or {}
+            name = obj.get("name") or it.get("fund_name")
+            day_map.setdefault(ds, []).append({
+                "code": code,
+                "fund_name": name,
+                "amount": amt,
+                "return_rate": float(pct),
+                "profit": prof
+            })
+            cur = cur + datetime.timedelta(days=1)
+    for d, arr in sorted(day_map.items()):
+        upsert_user_positions_daily(user_id, arr, d, "close")
+        total_written += len(arr)
+    sums = sum_all_profit_by_code(user_id) or {}
+    cur_items = get_user_positions_json(user_id) or []
+    to_write = []
+    for it in cur_items:
+        code = str(it.get("code") or "").strip()
+        if not code:
+            continue
+        total = float(sums.get(code) or 0.0)
+        to_write.append({
+            "code": code,
+            "fund_name": it.get("fund_name"),
+            "amount": it.get("amount"),
+            "earnings_yesterday": it.get("earnings_yesterday"),
+            "total_earnings": total,
+            "return_rate": it.get("return_rate"),
+            "notes": it.get("notes")
+        })
+    if to_write:
+        upsert_user_positions_json(user_id, to_write)
+    return {"ok": True, "backfilled_days": len(day_map), "written": total_written, "recomputed": len(to_write)}
 def _seconds_until(target_h, target_m):
     now = datetime.datetime.now()
     target = now.replace(hour=target_h, minute=target_m, second=0, microsecond=0)
