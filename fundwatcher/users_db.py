@@ -60,6 +60,17 @@ def init_users_db():
             "PRIMARY KEY(user_id, date, time_slot, code)"
             ")"
         )
+        c.execute(
+            "CREATE TABLE IF NOT EXISTS user_favorites ("
+            "user_id INTEGER,"
+            "code TEXT,"
+            "fund_name TEXT,"
+            "note TEXT,"
+            "created_at INTEGER,"
+            "updated_at INTEGER,"
+            "PRIMARY KEY(user_id, code)"
+            ")"
+        )
         conn.commit()
     finally:
         conn.close()
@@ -421,6 +432,63 @@ def clear_user_positions_daily(user_id):
     finally:
         conn.close()
 
+
+def get_user_favorites(user_id):
+    conn = _connect()
+    try:
+        c = conn.cursor()
+        c.execute(
+            "SELECT code,fund_name,note,created_at,updated_at FROM user_favorites WHERE user_id=? ORDER BY updated_at DESC",
+            (int(user_id),),
+        )
+        items = []
+        for cd, nm, nt, ct, ut in c.fetchall():
+            items.append({"code": cd, "fund_name": nm, "note": nt, "created_at": ct, "updated_at": ut})
+        return items
+    finally:
+        conn.close()
+
+
+def upsert_user_favorites(user_id, items):
+    if not items:
+        return
+    ts = int(time.time())
+    conn = _connect()
+    try:
+        c = conn.cursor()
+        for it in items:
+            ct = int(it.get("created_at") or ts)
+            c.execute(
+                "INSERT INTO user_favorites(user_id,code,fund_name,note,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?) "
+                "ON CONFLICT(user_id,code) DO UPDATE SET fund_name=excluded.fund_name,note=excluded.note,updated_at=excluded.updated_at",
+                (int(user_id), it.get("code"), it.get("fund_name"), it.get("note"), ct, ts),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_user_favorite(user_id, code):
+    conn = _connect()
+    try:
+        c = conn.cursor()
+        c.execute("DELETE FROM user_favorites WHERE user_id=? AND code=?", (int(user_id), str(code or "").strip()))
+        conn.commit()
+        return c.rowcount or 0
+    finally:
+        conn.close()
+
+
+def clear_user_favorites(user_id):
+    conn = _connect()
+    try:
+        c = conn.cursor()
+        c.execute("DELETE FROM user_favorites WHERE user_id=?", (int(user_id),))
+        conn.commit()
+        return c.rowcount or 0
+    finally:
+        conn.close()
 
 
 def purge_non_admin_users():

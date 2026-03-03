@@ -4,6 +4,7 @@ import time
 import threading
 import datetime
 import secrets
+import sqlite3
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, quote, unquote
 from .eastmoney import fetch_fund_estimation, fetch_fund_profile, fetch_fundcode_search, fetch_latest_nav_change, fetch_nav_change_series
@@ -28,6 +29,10 @@ from .users_db import (
     get_user_positions_daily,
     sum_daily_profit_by_code,
     sum_all_profit_by_code,
+    get_user_favorites,
+    upsert_user_favorites,
+    delete_user_favorite,
+    clear_user_favorites,
 )
 from .akshare import fetch_all_funds_basic, fetch_fund_detail_xq
 
@@ -61,6 +66,7 @@ INDEX_HTML = """<!doctype html>
 <div class="nav">
 <a href="/">估值</a>
 <a href="/upload-portfolio">个人持仓</a>
+<a href="/favorites">自选基金</a>
 <a href="/admin/funds">基金资料维护</a>
 <span style="margin-left:auto" id="authLinks"></span>
 </div>
@@ -392,6 +398,7 @@ th,td{border-bottom:1px solid #eee;padding:8px;text-align:left;font-size:14px}
 <div class="nav">
 <a href="/">估值</a>
 <a href="/upload-portfolio">个人持仓</a>
+<a href="/favorites">自选基金</a>
 <a href="/admin/funds">基金资料维护</a>
 <span style="margin-left:auto" id="authLinks"></span>
 </div>
@@ -1064,6 +1071,388 @@ submit.addEventListener("click",async ()=>{
 </html>
 """
 
+FAVORITES_HTML = """<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>自选基金</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;max-width:900px;margin:24px auto;padding:0 16px;color:#666}
+h1{font-size:22px;margin:0 0 12px;color:#666}
+.row{display:flex;gap:8px;margin:12px 0}
+input,textarea{flex:1;padding:8px 10px;border:1px solid #ccc;border-radius:6px;color:#666}
+button{padding:8px 12px;border:1px solid #1a73e8;background:#1a73e8;color:#fff;border-radius:6px}
+.muted{color:#888}
+.nav{display:flex;gap:12px;padding:8px 0;border-bottom:1px solid #eee;margin-bottom:12px}
+.nav a{color:#1a73e8;text-decoration:none}
+table{width:100%;border-collapse:collapse;margin-top:12px;color:#666}
+th,td{border-bottom:1px solid #eee;padding:8px;text-align:left;font-size:14px}
+.pos{color:#d93025}
+.neg{color:#0b8f2d}
+.panel{border:1px solid #eee;border-radius:8px;padding:12px}
+</style>
+</head>
+<body>
+<h1>自选基金</h1>
+<div class="nav">
+<a href="/">估值</a>
+<a href="/upload-portfolio">个人持仓</a>
+<a href="/favorites">自选基金</a>
+<a href="/admin/funds">基金资料维护</a>
+<span style="margin-left:auto" id="authLinks"></span>
+</div>
+<div class="panel">
+<div class="row"><strong>批量导入（基金代码，逗号/换行分隔）</strong></div>
+<div class="row"><textarea id="batchCodes" rows="4">110022
+161725,007888</textarea></div>
+<div class="row"><button id="btnBatchImport">批量导入</button><span id="status" class="muted"></span></div>
+</div>
+<div class="panel" style="margin-top:12px">
+<div class="row"><strong>单个新增</strong></div>
+<div class="row"><input id="addCode" placeholder="基金代码" /><button id="btnAddByCode">按代码添加</button></div>
+<div class="row"><input id="addName" placeholder="基金名称（模糊匹配）" /><button id="btnAddByName">按名称添加</button></div>
+</div>
+<div class="panel" style="margin-top:12px">
+<div class="row"><strong>查找基金</strong></div>
+<div class="row"><input id="searchQ" placeholder="基金代码或名称（支持模糊）" /><button id="btnSearch">搜索</button></div>
+<table>
+<thead><tr><th>代码</th><th>名称</th><th>操作</th></tr></thead>
+<tbody id="searchTbody"></tbody>
+</table>
+<div class="row"><button id="searchPrev">上一页</button><span id="searchPageStatus" class="muted" style="margin:0 8px"></span><button id="searchNext">下一页</button></div>
+</div>
+<div class="row" style="margin-top:12px"><strong>我的自选</strong><span class="muted" style="margin-left:8px" id="favStatus"></span><button id="btnClear" style="margin-left:auto;background:#b3261e;border-color:#b3261e">清空</button></div>
+<div class="row"><button id="btnImportFromDist">从发行版数据库导入</button></div>
+<table>
+<thead><tr><th>代码</th><th>名称</th><th>今日涨跌</th><th>备注</th><th>创建时间</th><th>更新</th><th>操作</th></tr></thead>
+<tbody id="favTbody"></tbody>
+</table>
+<div class="row"><button id="favPrev">上一页</button><span id="favPageStatus" class="muted" style="margin:0 8px"></span><button id="favNext">下一页</button></div>
+<script>
+const statusEl=document.getElementById("status")
+const favStatus=document.getElementById("favStatus")
+async function initAuthLinks(){
+  const el=document.getElementById("authLinks")
+  if(!el) return
+  try{
+    const r=await fetch("/api/session",{cache:"no-store"})
+    const j=await r.json()
+    if(j && j.logged_in){
+      const uname=String(j.username||"")
+      el.innerHTML = `<span class="muted">用户：${uname}</span> <a href="/switch-user">切换用户</a> <a href="/logout">登出</a>` + (j.is_super?` <a href="/admin/users">管理用户</a>`:"")
+    }else{
+      el.innerHTML = `<a href="/login">登录</a> <a href="/register">注册</a>`
+    }
+  }catch(e){}
+}
+function fmtTs(ts){
+  if(ts===undefined||ts===null) return ""
+  const n=Number(ts)
+  if(!isFinite(n)||n<=0) return ""
+  const d=new Date(n*1000)
+  const pad=(x)=>String(x).padStart(2,"0")
+  return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
+}
+const favTbody=document.getElementById("favTbody")
+const favPrev=document.getElementById("favPrev")
+const favNext=document.getElementById("favNext")
+const favPageStatus=document.getElementById("favPageStatus")
+const searchTbody=document.getElementById("searchTbody")
+const searchPrev=document.getElementById("searchPrev")
+const searchNext=document.getElementById("searchNext")
+const searchPageStatus=document.getElementById("searchPageStatus")
+let favItems=[], favPage=1, favPageSize=30
+let searchItems=[], searchPage=1, searchPageSize=15
+function renderFav(items){
+  favTbody.innerHTML=""
+  for(const it of items||[]){
+    const tr=document.createElement("tr")
+    tr.setAttribute("data-code", String(it.code||""))
+    tr.setAttribute("data-name", String(it.fund_name||""))
+    tr.setAttribute("data-note", String(it.note||""))
+    const dp = (it.daily_pct===undefined||it.daily_pct===null) ? "" : (Number(it.daily_pct).toFixed(2)+"%")
+    const cls = (typeof it.daily_pct==="number") ? (it.daily_pct>=0?"pos":"neg") : ""
+    tr.innerHTML = `<td>${it.code||""}</td><td>${it.fund_name||""}</td><td class="${cls}">${dp}</td><td>${it.note||""}</td><td>${fmtTs(it.created_at)}</td><td>${fmtTs(it.updated_at)}</td>
+    <td><button class="edit" data-code="${it.code||""}">修改</button><button class="del" data-code="${it.code||""}" style="margin-left:8px">删除</button></td>`
+    favTbody.appendChild(tr)
+  }
+  for(const btn of favTbody.querySelectorAll("button.edit")){
+    btn.addEventListener("click", async ()=>{
+      const tr=btn.closest("tr")
+      const tds=tr.querySelectorAll("td")
+      const codeAttr = (tr.getAttribute("data-code") || tds[0].textContent || "").trim()
+      if(btn.textContent==="修改"){
+        const nameInput=document.createElement("input")
+        nameInput.value = tr.getAttribute("data-name") || tds[1].textContent || ""
+        nameInput.className = "name-input"
+        const noteInput=document.createElement("input")
+        noteInput.value = tr.getAttribute("data-note") || tds[2].textContent || ""
+        noteInput.className = "note-input"
+        tds[1].innerHTML=""; tds[1].appendChild(nameInput)
+        tds[2].innerHTML=""; tds[2].appendChild(noteInput)
+        btn.textContent="保存"
+        const actionTd = tds[5]
+        const cancelBtn = document.createElement("button")
+        cancelBtn.className = "cancel"
+        cancelBtn.textContent = "取消"
+        actionTd.appendChild(cancelBtn)
+        cancelBtn.addEventListener("click", ()=>{
+          tds[1].textContent = tr.getAttribute("data-name") || ""
+          tds[2].textContent = tr.getAttribute("data-note") || ""
+          btn.textContent = "修改"
+          cancelBtn.remove()
+        })
+        return
+      }
+      const nameEl = tr.querySelector("input.name-input")
+      const noteEl = tr.querySelector("input.note-input")
+      const body = new URLSearchParams()
+      body.set("code", codeAttr)
+      body.set("fund_name", (nameEl && nameEl.value || "").trim())
+      body.set("note", (noteEl && noteEl.value || "").trim())
+      try{
+        const r=await fetch("/api/favorites/update", {method:"POST", headers:{"Content-Type":"application/x-www-form-urlencoded"}, body: body.toString()})
+        const j=await r.json()
+        if(r.ok && j.ok){
+          loadFav()
+        }else{
+          alert(j.error || "保存失败")
+        }
+      }catch(e){
+        alert("保存失败")
+      }
+    })
+  }
+  for(const btn of favTbody.querySelectorAll("button.del")){
+    btn.addEventListener("click", async ()=>{
+      const code=btn.getAttribute("data-code")||""
+      const body=new URLSearchParams()
+      body.set("code", code)
+      try{
+        const r=await fetch("/api/favorites/delete", {method:"POST", headers:{"Content-Type":"application/x-www-form-urlencoded"}, body: body.toString()})
+        const j=await r.json()
+        if(r.ok && j.ok){
+          loadFav()
+        }else{
+          alert(j.error || "删除失败")
+        }
+      }catch(e){
+        alert("删除失败")
+      }
+    })
+  }
+}
+async function loadFav(){
+  try{
+    const r=await fetch("/api/favorites",{cache:"no-store"})
+    const j=await r.json()
+    favItems=(j.items||[])
+    const codes=favItems.map(x=>String(x.code||"").trim()).filter(x=>x)
+    if(codes.length>0){
+      try{
+        const r2=await fetch("/api/funds?codes="+encodeURIComponent(codes.join(",")), {cache:"no-store"})
+        const j2=await r2.json()
+        const mp={}
+        for(const it of (j2.items||[])){
+          const cd=String(it.code||it.fundcode||"").trim()
+          if(!cd) continue
+          mp[cd]=it
+        }
+        for(const it of favItems){
+          const cd=String(it.code||"").trim()
+          const src=mp[cd]
+          if(src && typeof src.daily_pct==="number"){
+            it.daily_pct=src.daily_pct
+          }else{
+            it.daily_pct=null
+          }
+        }
+      }catch(e){}
+    }
+    const total=favItems.length
+    const pages=Math.max(1, Math.ceil(total/favPageSize))
+    favPage=Math.min(Math.max(1, favPage), pages)
+    const start=(favPage-1)*favPageSize
+    const end=start+favPageSize
+    renderFav(favItems.slice(start,end))
+    if(favPageStatus) favPageStatus.textContent = `${favPage}/${pages}`
+    if(favPrev) favPrev.disabled = (favPage<=1)
+    if(favNext) favNext.disabled = (favPage>=pages)
+    favStatus.textContent = `共 ${((j.items||[]).length)} 条`
+  }catch(e){
+    renderFav([])
+    favStatus.textContent = ""
+  }
+}
+const batchCodes=document.getElementById("batchCodes")
+const btnBatchImport=document.getElementById("btnBatchImport")
+btnBatchImport.addEventListener("click", async ()=>{
+  const raw=(batchCodes.value||"").trim()
+  if(!raw){ statusEl.textContent="请输入基金代码"; return }
+  const parts=raw.split(/[\\s,\\n]+/).map(x=>x.trim()).filter(x=>x)
+  if(parts.length===0){ statusEl.textContent="请输入基金代码"; return }
+  try{
+    const r=await fetch("/api/favorites/batch_import",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(parts)})
+    const j=await r.json()
+    statusEl.textContent = j.ok ? `已导入 ${j.count||0} 条` : (j.error||"导入失败")
+    loadFav()
+  }catch(e){
+    statusEl.textContent="导入失败"
+  }
+})
+const addCode=document.getElementById("addCode")
+const addName=document.getElementById("addName")
+const btnAddByCode=document.getElementById("btnAddByCode")
+const btnAddByName=document.getElementById("btnAddByName")
+btnAddByCode.addEventListener("click", async ()=>{
+  const c=addCode.value.trim()
+  if(!c){ statusEl.textContent="请输入基金代码"; return }
+  const body=new URLSearchParams()
+  body.set("code", c)
+  try{
+    const r=await fetch("/api/favorites/add",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:body.toString()})
+    const j=await r.json()
+    statusEl.textContent = j.ok ? "已添加" : (j.error||"添加失败")
+    addCode.value=""
+    loadFav()
+  }catch(e){
+    statusEl.textContent="添加失败"
+  }
+})
+btnAddByName.addEventListener("click", async ()=>{
+  const n=addName.value.trim()
+  if(!n){ statusEl.textContent="请输入基金名称"; return }
+  const body=new URLSearchParams()
+  body.set("fund_name", n)
+  try{
+    const r=await fetch("/api/favorites/add",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:body.toString()})
+    const j=await r.json()
+    statusEl.textContent = j.ok ? "已添加" : (j.error||"添加失败")
+    addName.value=""
+    loadFav()
+  }catch(e){
+    statusEl.textContent="添加失败"
+  }
+})
+function renderSearch(items){
+  searchTbody.innerHTML=""
+  for(const it of items||[]){
+    const tr=document.createElement("tr")
+    tr.innerHTML=`<td>${it.code||""}</td><td>${it.name||""}</td><td><button class="add" data-code="${it.code||""}" data-name="${it.name||""}">添加</button></td>`
+    searchTbody.appendChild(tr)
+  }
+  for(const btn of searchTbody.querySelectorAll("button.add")){
+    btn.addEventListener("click", async ()=>{
+      const code=btn.getAttribute("data-code")||""
+      const name=btn.getAttribute("data-name")||""
+      const body=new URLSearchParams()
+      body.set("code", code)
+      body.set("fund_name", name)
+      try{
+        const r=await fetch("/api/favorites/add",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:body.toString()})
+        const j=await r.json()
+        if(r.ok && j.ok){ loadFav() } else { alert(j.error||"添加失败") }
+      }catch(e){
+        alert("添加失败")
+      }
+    })
+  }
+}
+const btnSearch=document.getElementById("btnSearch")
+const searchQ=document.getElementById("searchQ")
+const btnImportFromDist=document.getElementById("btnImportFromDist")
+if(btnImportFromDist) btnImportFromDist.addEventListener("click", async ()=>{
+  try{
+    const r=await fetch("/api/favorites/import_from_dist",{method:"POST"})
+    const j=await r.json()
+    statusEl.textContent = j.ok ? `已导入 ${j.count||0} 条` : (j.error||"导入失败")
+    loadFav()
+  }catch(e){
+    statusEl.textContent="导入失败"
+  }
+})
+btnSearch.addEventListener("click", async ()=>{
+  const q=searchQ.value.trim()
+  if(!q){ renderSearch([]); return }
+  try{
+    const r=await fetch("/api/search?q="+encodeURIComponent(q), {cache:"no-store"})
+    const j=await r.json()
+    searchItems=(j.items||[])
+    const total=searchItems.length
+    const pages=Math.max(1, Math.ceil(total/searchPageSize))
+    searchPage=1
+    const start=(searchPage-1)*searchPageSize
+    const end=start+searchPageSize
+    renderSearch(searchItems.slice(start,end))
+    if(searchPageStatus) searchPageStatus.textContent = `${searchPage}/${pages}`
+    if(searchPrev) searchPrev.disabled = (searchPage<=1)
+    if(searchNext) searchNext.disabled = (searchPage>=pages)
+  }catch(e){
+    renderSearch([])
+  }
+})
+if(searchPrev) searchPrev.addEventListener("click", ()=>{
+  const total=searchItems.length
+  const pages=Math.max(1, Math.ceil(total/searchPageSize))
+  searchPage=Math.max(1, searchPage-1)
+  const start=(searchPage-1)*searchPageSize
+  const end=start+searchPageSize
+  renderSearch(searchItems.slice(start,end))
+  if(searchPageStatus) searchPageStatus.textContent = `${searchPage}/${pages}`
+  if(searchPrev) searchPrev.disabled = (searchPage<=1)
+  if(searchNext) searchNext.disabled = (searchPage>=pages)
+})
+if(searchNext) searchNext.addEventListener("click", ()=>{
+  const total=searchItems.length
+  const pages=Math.max(1, Math.ceil(total/searchPageSize))
+  searchPage=Math.min(pages, searchPage+1)
+  const start=(searchPage-1)*searchPageSize
+  const end=start+searchPageSize
+  renderSearch(searchItems.slice(start,end))
+  if(searchPageStatus) searchPageStatus.textContent = `${searchPage}/${pages}`
+  if(searchPrev) searchPrev.disabled = (searchPage<=1)
+  if(searchNext) searchNext.disabled = (searchPage>=pages)
+})
+if(favPrev) favPrev.addEventListener("click", ()=>{
+  const total=favItems.length
+  const pages=Math.max(1, Math.ceil(total/favPageSize))
+  favPage=Math.max(1, favPage-1)
+  const start=(favPage-1)*favPageSize
+  const end=start+favPageSize
+  renderFav(favItems.slice(start,end))
+  if(favPageStatus) favPageStatus.textContent = `${favPage}/${pages}`
+  if(favPrev) favPrev.disabled = (favPage<=1)
+  if(favNext) favNext.disabled = (favPage>=pages)
+})
+if(favNext) favNext.addEventListener("click", ()=>{
+  const total=favItems.length
+  const pages=Math.max(1, Math.ceil(total/favPageSize))
+  favPage=Math.min(pages, favPage+1)
+  const start=(favPage-1)*favPageSize
+  const end=start+favPageSize
+  renderFav(favItems.slice(start,end))
+  if(favPageStatus) favPageStatus.textContent = `${favPage}/${pages}`
+  if(favPrev) favPrev.disabled = (favPage<=1)
+  if(favNext) favNext.disabled = (favPage>=pages)
+})
+document.getElementById("btnClear").addEventListener("click", async ()=>{
+  if(!confirm("确定清空我的自选基金吗？")) return
+  try{
+    const r=await fetch("/api/favorites/clear",{method:"POST"})
+    const j=await r.json()
+    if(r.ok && j.ok){ loadFav() } else { alert(j.error||"清空失败") }
+  }catch(e){
+    alert("清空失败")
+  }
+})
+initAuthLinks()
+loadFav()
+</script>
+</body>
+</html>
+"""
+
 class Handler(BaseHTTPRequestHandler):
     def _send_json(self, obj, status=200, extra_headers=None):
         data = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -1319,6 +1708,12 @@ if(loginLink){
                 return
             self._send_html(UPLOAD_PORTFOLIO_HTML)
             return
+        if p.path == "/favorites":
+            u = self._require_login_page("/favorites")
+            if not u:
+                return
+            self._send_html(FAVORITES_HTML)
+            return
         if p.path == "/admin/funds":
             html = """<!doctype html><html><head><meta charset="utf-8"><title>基金资料维护</title><meta name="viewport" content="width=device-width, initial-scale=1"><style>body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;max-width:900px;margin:24px auto;padding:0 16px;color:#666}.nav{display:flex;gap:12px;padding:8px 0;border-bottom:1px solid #eee;margin-bottom:12px}.nav a{color:#1a73e8;text-decoration:none}.row{display:flex;gap:8px;margin:12px 0}input,textarea{flex:1;padding:8px 10px;border:1px solid #ccc;border-radius:6px;color:#666}button{padding:8px 12px;border:1px solid #1a73e8;background:#1a73e8;color:#fff;border-radius:6px}.muted{color:#888}.progress{width:100%;height:8px;background:#eee;border-radius:6px}.bar{height:100%;background:#1a73e8;width:0%;border-radius:6px}</style></head><body><h1>基金资料维护</h1><div class="nav"><a href="/">估值</a><a href="/upload-portfolio">个人持仓</a><a href="/admin/funds">基金资料维护</a></div><div class="row"><strong>手动录入</strong></div><div class="row"><input id="code" placeholder="基金代码"><input id="name" placeholder="基金名称"><input id="type" placeholder="类型"><input id="company" placeholder="公司"><input id="managers" placeholder="经理（逗号分隔）"></div><div class="row"><button id="save">保存到本地</button></div><div class="row"><strong>从网上获取并保存</strong></div><div class="row"><input id="fetchCode" placeholder="基金代码"><button id="fetchSave">获取并保存</button></div><div class="row"><strong>一键补充/更新（EastMoney基金代码库）</strong></div><div class="row"><input id="emLimit" placeholder="每批条数（默认500）"><input id="emOffset" placeholder="起始offset（默认0）"><button id="emIngest">批量导入</button></div><div class="row"><div class="progress"><div id="emBar" class="bar"></div></div></div><div class="row"><span id="status" class="muted"></span></div><script>const statusEl=document.getElementById("status");document.getElementById("save").addEventListener("click",async()=>{const body=new URLSearchParams();const code=document.getElementById("code").value.trim();if(!code){statusEl.textContent="请输入基金代码";return}body.set("code",code);body.set("name",document.getElementById("name").value.trim());body.set("type",document.getElementById("type").value.trim());body.set("company",document.getElementById("company").value.trim());body.set("managers",document.getElementById("managers").value.trim());const r=await fetch("/api/admin/fund/save",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:body.toString()});const j=await r.json();statusEl.textContent=j.ok?"已保存":"保存失败"});document.getElementById("fetchSave").addEventListener("click",async()=>{const code=document.getElementById("fetchCode").value.trim();if(!code){statusEl.textContent="请输入基金代码";return}const r=await fetch("/api/admin/fund/fetch_save?code="+encodeURIComponent(code));const j=await r.json();statusEl.textContent=j.ok?("已获取并保存："+(j.profile&&j.profile.name||"")):"获取失败"});document.getElementById("emIngest").addEventListener("click",async()=>{const limRaw=document.getElementById("emLimit").value.trim();const offRaw=document.getElementById("emOffset").value.trim();const chunk=limRaw?parseInt(limRaw,10):500;let offset=offRaw?parseInt(offRaw,10):0;let total=0;let done=0;const bar=document.getElementById("emBar");statusEl.textContent="准备中...";try{const meta=await fetch("/api/admin/eastmoney/fundcodes/meta");if(meta.ok){const j=await meta.json();total=j.total||0}}catch(e){}if(!total){statusEl.textContent="无法获取总量，改为单次导入";const q=new URLSearchParams();if(limRaw) q.set("limit",limRaw);if(offRaw) q.set("offset",offRaw);const r=await fetch("/api/admin/eastmoney/fundcodes/ingest?"+q.toString());const j=await r.json();statusEl.textContent=j.ok?`已导入 ${j.count||0} 条`:"导入失败";bar.style.width="100%";return}statusEl.textContent=`开始导入，共 ${total} 条`;while(offset<total){const q=new URLSearchParams();q.set("limit", String(chunk));q.set("offset", String(offset));const r=await fetch("/api/admin/eastmoney/fundcodes/ingest?"+q.toString());const j=await r.json();if(!j.ok){statusEl.textContent="导入失败";break}done+=j.count||0;offset+=chunk;const pct=Math.min(100, Math.floor(done*100/total));bar.style.width=pct+"%";statusEl.textContent=`已导入 ${done}/${total}`;}if(offset>=total){bar.style.width="100%";statusEl.textContent=`完成，共导入 ${done} 条`;}});</script></body></html>"""
             self._send_html(html)
@@ -1487,6 +1882,12 @@ if(loginLink){
                 upsert_user_positions_json(u.get("id"), to_write)
             self._send_json({"ok": True, "date": d, "updated": len(to_write)})
             return
+        if p.path == "/api/favorites":
+            u = self._require_login_api()
+            if not u:
+                return
+            self._send_json({"items": get_user_favorites(u.get("id"))})
+            return
         if p.path == "/api/funds":
             u = self._require_login_api()
             if not u:
@@ -1523,6 +1924,55 @@ if(loginLink){
                     obj["pct_source"] = "estimate"
                 if obj:
                     items.append(obj)
+            self._send_json({"items": items})
+            return
+        if p.path == "/api/search":
+            q = parse_qs(p.query or "")
+            t = (q.get("q") or [""])[0].strip()
+            if not t:
+                self._send_json({"items": []})
+                return
+            items = []
+            try:
+                src = fetch_fundcode_search() or []
+            except Exception:
+                src = []
+            def _norm(s):
+                s = (s or "").strip()
+                s = s.replace("连接", "联接")
+                s = s.replace("发起式联接", "联接")
+                s = s.replace("发起联接", "联接")
+                s = s.replace("发起式", "")
+                s = s.replace("发起", "")
+                s = s.replace("指数基金", "指数")
+                s = s.replace("成份指数", "指数")
+                s = s.replace("交易型开放式指数基金", "ETF")
+                s = s.replace("（LOF）", "").replace("(LOF)", "")
+                s = s.replace("LOF", "")
+                s = s.replace("ETF联接", "联接")
+                s = s.replace("ETF", "")
+                s = s.replace("基金", "")
+                s = s.replace("型", "")
+                s = s.replace("中证全指证券公司", "证券")
+                s = s.replace("（", "(").replace("）", ")")
+                s = s.replace(" ", "")
+                return s
+            tn = _norm(t)
+            is_num = all(ch.isdigit() for ch in t if ch.strip())
+            for it in src:
+                code = str(it.get("code") or "").strip()
+                name = str(it.get("name") or "").strip()
+                if not code:
+                    continue
+                if is_num:
+                    if t in code:
+                        items.append({"code": code, "name": name})
+                else:
+                    nn = _norm(name)
+                    if t in name or tn in nn or nn in tn:
+                        items.append({"code": code, "name": name})
+                if len(items) >= 100:
+                    break
             self._send_json({"items": items})
             return
         if p.path.startswith("/api/fund/"):
@@ -1761,6 +2211,13 @@ document.querySelectorAll("button.del").forEach(btn=>{
                 return
             self._send_json({"ok": True})
             return
+        if p.path == "/api/favorites/clear":
+            u = self._require_login_api()
+            if not u:
+                return
+            clear_user_favorites(u.get("id"))
+            self._send_json({"ok": True})
+            return
         if p.path == "/api/admin/portfolio/clear":
             u = self._require_login_api()
             if not u:
@@ -1799,6 +2256,37 @@ document.querySelectorAll("button.del").forEach(btn=>{
                 items.append({"code": code, "fund_name": name, "amount": amount, "earnings_yesterday": yp, "total_earnings": it.get("total_earnings"), "return_rate": hr, "notes": it.get("notes")})
             if items:
                 upsert_user_positions_json(u.get("id"), items)
+            self._send_json({"ok": True, "count": len(items)})
+            return
+        if p.path == "/api/favorites/batch_import":
+            u = self._require_login_api()
+            if not u:
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except Exception:
+                length = 0
+            body = self.rfile.read(length) if length > 0 else b""
+            arr = []
+            try:
+                j = json.loads(body.decode("utf-8", errors="ignore"))
+                if isinstance(j, list):
+                    arr = j
+            except Exception:
+                arr = []
+            arr = [str(x or "").strip() for x in (arr or []) if str(x or "").strip()]
+            if not arr:
+                self._send_json({"ok": False, "error": "empty_codes"}, status=400)
+                return
+            items = []
+            for code in arr:
+                nm = None
+                prof = get_fund(code)
+                if prof:
+                    nm = prof.get("name")
+                items.append({"code": code, "fund_name": nm})
+            if items:
+                upsert_user_favorites(u.get("id"), items)
             self._send_json({"ok": True, "count": len(items)})
             return
         if p.path == "/api/admin/portfolio/json":
@@ -1842,6 +2330,157 @@ document.querySelectorAll("button.del").forEach(btn=>{
             if filled and commit:
                 upsert_user_positions_json(u.get("id"), filled)
             self._send_json({"ok": True, "count": len(filled), "items": filled, "committed": bool(filled and commit), "not_found": not_found})
+            return
+        if p.path == "/api/favorites/add":
+            u = self._require_login_api()
+            if not u:
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except Exception:
+                length = 0
+            body = self.rfile.read(length) if length > 0 else b""
+            kv = {}
+            try:
+                kv = parse_qs(body.decode("utf-8", errors="ignore"))
+            except Exception:
+                kv = {}
+            code = (kv.get("code") or [""])[0].strip()
+            fname = (kv.get("fund_name") or [""])[0].strip()
+            note = (kv.get("note") or [""])[0].strip()
+            if not code and not fname:
+                self._send_json({"ok": False, "error": "missing_code_or_name"}, status=400)
+                return
+            if not code and fname:
+                code = find_fund_code_by_name(fname) or ""
+            if not code:
+                self._send_json({"ok": False, "error": "not_found"}, status=404)
+                return
+            prof = get_fund(code) or {}
+            nm = fname or prof.get("name")
+            upsert_user_favorites(u.get("id"), [{"code": code, "fund_name": nm or None, "note": (note or None)}])
+            self._send_json({"ok": True})
+            return
+        if p.path == "/api/favorites/update":
+            u = self._require_login_api()
+            if not u:
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except Exception:
+                length = 0
+            body = self.rfile.read(length) if length > 0 else b""
+            kv = {}
+            try:
+                kv = parse_qs(body.decode("utf-8", errors="ignore"))
+            except Exception:
+                kv = {}
+            code = (kv.get("code") or [""])[0].strip()
+            new_code = (kv.get("new_code") or [""])[0].strip()
+            fname = (kv.get("fund_name") or [""])[0].strip()
+            note = (kv.get("note") or [""])[0].strip()
+            if not code:
+                self._send_json({"ok": False, "error": "missing_code"}, status=400)
+                return
+            items = get_user_favorites(u.get("id")) or []
+            mp = {str(it.get("code") or "").strip(): it for it in items}
+            cur = mp.get(code)
+            if not cur:
+                self._send_json({"ok": False, "error": "not_found"}, status=404)
+                return
+            tgt_code = new_code or code
+            if tgt_code != code and mp.get(tgt_code):
+                self._send_json({"ok": False, "error": "code_exists"}, status=400)
+                return
+            target_name = fname or cur.get("fund_name")
+            if not target_name:
+                prof = get_fund(tgt_code)
+                if prof:
+                    target_name = prof.get("name")
+            payload = {"code": tgt_code, "fund_name": target_name or None, "note": (note if note != "" else cur.get("note")) or None}
+            if tgt_code != code:
+                delete_user_favorite(u.get("id"), code)
+            upsert_user_favorites(u.get("id"), [payload])
+            self._send_json({"ok": True})
+            return
+        if p.path == "/api/favorites/delete":
+            u = self._require_login_api()
+            if not u:
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except Exception:
+                length = 0
+            body = self.rfile.read(length) if length > 0 else b""
+            kv = {}
+            try:
+                kv = parse_qs(body.decode("utf-8", errors="ignore"))
+            except Exception:
+                kv = {}
+            code = (kv.get("code") or [""])[0].strip()
+            if not code:
+                self._send_json({"ok": False, "error": "missing_code"}, status=400)
+                return
+            delete_user_favorite(u.get("id"), code)
+            self._send_json({"ok": True})
+            return
+        if p.path == "/api/favorites/delete_batch":
+            u = self._require_login_api()
+            if not u:
+                return
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except Exception:
+                length = 0
+            body = self.rfile.read(length) if length > 0 else b""
+            codes = []
+            try:
+                j = json.loads(body.decode("utf-8", errors="ignore"))
+                if isinstance(j, dict):
+                    codes = j.get("codes") or []
+                elif isinstance(j, list):
+                    codes = j
+            except Exception:
+                codes = []
+            codes = [str(x or "").strip() for x in (codes or []) if str(x or "").strip()]
+            if not codes:
+                self._send_json({"ok": False, "error": "empty_codes"}, status=400)
+                return
+            deleted = 0
+            for cd in codes:
+                deleted += int(delete_user_favorite(u.get("id"), cd) or 0)
+            self._send_json({"ok": True, "deleted": deleted})
+            return
+        if p.path == "/api/favorites/import_from_dist":
+            u = self._require_login_api()
+            if not u:
+                return
+            root = os.path.dirname(os.path.dirname(__file__))
+            dist_db = os.path.join(root, "dist", "FundValuationWatcher", "_internal", "fundwatcher", "users.sqlite")
+            if not os.path.exists(dist_db):
+                self._send_json({"ok": False, "error": "dist_db_missing"})
+                return
+            items = []
+            try:
+                conn = sqlite3.connect(dist_db)
+                c = conn.cursor()
+                c.execute("SELECT id FROM users WHERE username=?", (str(u.get("username") or ""),))
+                row = c.fetchone()
+                if row:
+                    ext_uid = int(row[0])
+                    c.execute("SELECT code,fund_name,note,created_at,updated_at FROM user_favorites WHERE user_id=?", (ext_uid,))
+                    for cd, nm, nt, ct, ut in c.fetchall():
+                        items.append({"code": cd, "fund_name": nm, "note": nt, "created_at": ct})
+            except Exception:
+                items = []
+            finally:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+            if items:
+                upsert_user_favorites(u.get("id"), items)
+            self._send_json({"ok": True, "count": len(items)})
             return
         if p.path == "/api/admin/portfolio/add":
             u = self._require_login_api()
