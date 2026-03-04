@@ -39,7 +39,11 @@
   - 推荐方案：在 Windows 环境（实体机/虚拟机/CI）执行打包，或使用本文提供的 GitHub Actions 工作流。
 - 数据文件
   - `fundwatcher/config.json` 已在 `.spec` 中作为数据文件打包。
-  - 数据库（`funds.sqlite`、`users.sqlite`）首次运行会按代码中的路径自动生成；如需预置，可在打包后手动放置到 `dist/FundValuationWatcher/_internal/fundwatcher/`。
+  - 数据库（`funds.sqlite`、`users.sqlite`）首次运行会自动生成。
+    - 用户库（`users.sqlite`）默认写入系统用户数据目录，可通过环境变量 `FUNDWATCHER_USERS_DB_PATH` 指定到任意路径；如检测到旧版路径 `fundwatcher/users.sqlite` 已存在，会优先沿用以避免数据丢失。
+    - 用户库 schema/版本迁移由 `fundwatcher/users_db_migrations.py` 维护，启动时会基于 SQLite `PRAGMA user_version` 自动创建/升级。
+    - 如需“预置空库”，建议通过运行一次程序自动生成，而不是提交任何真实数据库文件到仓库。
+  - 打包产物目录（`dist/`、`build/`）可能包含运行时生成的数据库文件，建议不要提交到 GitHub；如此前已被 git 跟踪，需要手动从索引移除后再推送。
 - one-folder 与 one-file
   - 当前使用 one-folder（目录收集）方式，启动更快、排障更方便。
   - 如需 one-file，可改用 `--onefile`，但需额外测试数据文件路径解析。

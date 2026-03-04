@@ -10,6 +10,10 @@ fundwatcher/user.db-journal
 fundwatcher/user.db-shm
 fundwatcher/user.db-wal
 
+# Build outputs (may embed runtime DB files)
+dist/
+build/
+
 # macOS
 .DS_Store
 

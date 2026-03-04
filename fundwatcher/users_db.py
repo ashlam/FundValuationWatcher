@@ -1,77 +1,96 @@
 import os
+import sys
 import sqlite3
 import time
 import secrets
 import hashlib
 
-USERS_DB_PATH = os.path.join(os.path.dirname(__file__), "users.sqlite")
+from .users_db_migrations import MIGRATIONS, LATEST_VERSION
+
+_USERS_DB_PATH = None
+
+
+def get_users_db_path():
+    global _USERS_DB_PATH
+    if _USERS_DB_PATH:
+        return _USERS_DB_PATH
+    env_path = os.environ.get("FUNDWATCHER_USERS_DB_PATH") or os.environ.get("USERS_DB_PATH")
+    if env_path:
+        _USERS_DB_PATH = os.path.abspath(os.path.expanduser(env_path))
+        return _USERS_DB_PATH
+    legacy = os.path.join(os.path.dirname(__file__), "users.sqlite")
+    if os.path.exists(legacy):
+        _USERS_DB_PATH = legacy
+        return _USERS_DB_PATH
+    base = os.environ.get("FUNDWATCHER_DATA_DIR")
+    if base:
+        base = os.path.abspath(os.path.expanduser(base))
+    else:
+        home = os.path.expanduser("~")
+        if sys.platform == "darwin":
+            base = os.path.join(home, "Library", "Application Support", "FundValuationWatcher")
+        elif os.name == "nt":
+            base = os.path.join(os.environ.get("APPDATA") or home, "FundValuationWatcher")
+        else:
+            base = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.join(home, ".local", "share"), "fundvaluationwatcher")
+    _USERS_DB_PATH = os.path.join(base, "users.sqlite")
+    return _USERS_DB_PATH
 
 
 def _connect():
-    return sqlite3.connect(USERS_DB_PATH)
+    p = get_users_db_path()
+    d = os.path.dirname(p)
+    if d:
+        os.makedirs(d, exist_ok=True)
+    conn = sqlite3.connect(p, timeout=5)
+    try:
+        conn.execute("PRAGMA foreign_keys=ON")
+        conn.execute("PRAGMA busy_timeout=5000")
+    except Exception:
+        pass
+    return conn
+
+
+def _get_user_version(conn):
+    try:
+        c = conn.cursor()
+        c.execute("PRAGMA user_version")
+        return int((c.fetchone() or [0])[0] or 0)
+    except Exception:
+        return 0
+
+
+def _set_user_version(conn, version):
+    conn.execute(f"PRAGMA user_version={int(version)}")
+
+
+def _apply_migrations(conn):
+    cur = _get_user_version(conn)
+    if cur >= int(LATEST_VERSION or 0):
+        return cur
+    for ver, sql_list in MIGRATIONS:
+        if int(ver) <= int(cur):
+            continue
+        try:
+            for sql in (sql_list or []):
+                if sql:
+                    conn.execute(sql)
+            _set_user_version(conn, int(ver))
+            conn.commit()
+            cur = int(ver)
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
+    return cur
 
 
 def init_users_db():
     conn = _connect()
     try:
-        c = conn.cursor()
-        c.execute(
-            "CREATE TABLE IF NOT EXISTS users ("
-            "id INTEGER PRIMARY KEY AUTOINCREMENT,"
-            "username TEXT UNIQUE,"
-            "password_hash TEXT,"
-            "is_super INTEGER,"
-            "created_at INTEGER"
-            ")"
-        )
-        c.execute(
-            "CREATE TABLE IF NOT EXISTS sessions ("
-            "token TEXT PRIMARY KEY,"
-            "user_id INTEGER,"
-            "created_at INTEGER,"
-            "last_seen INTEGER"
-            ")"
-        )
-        c.execute(
-            "CREATE TABLE IF NOT EXISTS user_positions_json ("
-            "user_id INTEGER,"
-            "code TEXT,"
-            "fund_name TEXT,"
-            "amount REAL,"
-            "earnings_yesterday REAL,"
-            "total_earnings REAL,"
-            "return_rate REAL,"
-            "notes TEXT,"
-            "updated_at INTEGER,"
-            "PRIMARY KEY(user_id, code)"
-            ")"
-        )
-        c.execute(
-            "CREATE TABLE IF NOT EXISTS user_positions_daily ("
-            "user_id INTEGER,"
-            "date TEXT,"
-            "time_slot TEXT,"
-            "code TEXT,"
-            "fund_name TEXT,"
-            "amount REAL,"
-            "return_rate REAL,"
-            "profit REAL,"
-            "ts INTEGER,"
-            "PRIMARY KEY(user_id, date, time_slot, code)"
-            ")"
-        )
-        c.execute(
-            "CREATE TABLE IF NOT EXISTS user_favorites ("
-            "user_id INTEGER,"
-            "code TEXT,"
-            "fund_name TEXT,"
-            "note TEXT,"
-            "created_at INTEGER,"
-            "updated_at INTEGER,"
-            "PRIMARY KEY(user_id, code)"
-            ")"
-        )
-        conn.commit()
+        _apply_migrations(conn)
     finally:
         conn.close()
 

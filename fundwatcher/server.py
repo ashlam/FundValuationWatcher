@@ -630,7 +630,8 @@ function render(items){
         const codeInput=document.createElement("input")
         codeInput.value=codeAttr||""
         codeInput.className="code-input"
-        codeInput.readOnly=true
+        codeInput.type="text"
+        codeInput.inputMode="numeric"
         const amtInput=document.createElement("input")
         amtInput.value=tr.getAttribute("data-amount")||tds[3].textContent||""
         amtInput.className="amt-input"
@@ -669,6 +670,7 @@ function render(items){
       if(!curCode){ alert("请先补完基金编号"); return }
       const newCode = ((codeEl && codeEl.value)||"").trim() || curCode
       if(!newCode){ alert("基金代码不能为空"); return }
+      if(!/^\d{6}$/.test(newCode)){ alert("基金代码格式应为6位数字"); return }
       const amtVal = ((amtEl && amtEl.value)||"").trim()
       const teVal = ((teEl && teEl.value)||"").trim()
       const body=new URLSearchParams()
@@ -2556,6 +2558,14 @@ document.querySelectorAll("button.del").forEach(btn=>{
             target_fund_name = None
             if target_code != code:
                 prof = get_fund(target_code)
+                if not prof:
+                    try:
+                        prof2 = fetch_fund_profile(target_code)
+                        if prof2:
+                            upsert_fund_profile(target_code, prof2.get("name"), prof2.get("type"), prof2.get("company"), prof2.get("managers"))
+                            prof = get_fund(target_code)
+                    except Exception:
+                        prof = None
                 if not prof:
                     self._send_json({"ok": False, "error": "基金代码不存在"}, status=400)
                     return
