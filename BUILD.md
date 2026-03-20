@@ -20,6 +20,11 @@
    ./dist/FundValuationWatcher/FundValuationWatcher
    # 启动后访问：http://localhost:8000/
    ```
+   - 常用页面：
+     - `/`：估值主页
+      - `/rank`：全市场盘中估值 Top10
+     - `/upload-portfolio`：个人持仓
+     - `/favorites`：自选基金
 
 ## Windows（可选）
 1. 安装 Python 3.8+，并在命令提示符或 PowerShell 中执行：

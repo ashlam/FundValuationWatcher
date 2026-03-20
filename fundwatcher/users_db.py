@@ -452,6 +452,71 @@ def clear_user_positions_daily(user_id):
         conn.close()
 
 
+def delete_user_positions_daily_for_code(user_id, code):
+    cd = str(code or "").strip()
+    if not cd:
+        return 0
+    conn = _connect()
+    try:
+        c = conn.cursor()
+        c.execute("DELETE FROM user_positions_daily WHERE user_id=? AND code=?", (int(user_id), cd))
+        conn.commit()
+        return c.rowcount or 0
+    finally:
+        conn.close()
+
+
+def update_user_position_atomic(user_id, current_code, payload, invalidate_codes=None):
+    """
+    原子更新持仓：
+    - 可选清理多个 code 的 user_positions_daily
+    - 如更换基金代码，删除旧 code 的 user_positions_json
+    - Upsert 新/当前 code 的 user_positions_json
+    - 同一事务中提交，失败自动回滚
+    """
+    invalidate_codes = [str(x or "").strip() for x in (invalidate_codes or []) if str(x or "").strip()]
+    tgt_code = str(payload.get("code") or "").strip()
+    if not tgt_code:
+        return False
+    ts = int(time.time())
+    conn = _connect()
+    try:
+        c = conn.cursor()
+        c.execute("BEGIN")
+        for cd in invalidate_codes:
+            c.execute("DELETE FROM user_positions_daily WHERE user_id=? AND code=?", (int(user_id), cd))
+        cur_code = str(current_code or "").strip()
+        if cur_code and tgt_code != cur_code:
+            c.execute("DELETE FROM user_positions_json WHERE user_id=? AND code=?", (int(user_id), cur_code))
+        c.execute(
+            "INSERT INTO user_positions_json(user_id,code,fund_name,amount,earnings_yesterday,total_earnings,return_rate,notes,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(user_id,code) DO UPDATE SET "
+            "fund_name=excluded.fund_name,amount=excluded.amount,earnings_yesterday=excluded.earnings_yesterday,total_earnings=excluded.total_earnings,return_rate=excluded.return_rate,notes=excluded.notes,updated_at=excluded.updated_at",
+            (
+                int(user_id),
+                tgt_code,
+                payload.get("fund_name"),
+                payload.get("amount"),
+                payload.get("earnings_yesterday"),
+                payload.get("total_earnings"),
+                payload.get("return_rate"),
+                payload.get("notes"),
+                ts,
+            ),
+        )
+        conn.commit()
+        return True
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        return False
+    finally:
+        conn.close()
+
+
 def get_user_favorites(user_id):
     conn = _connect()
     try:

@@ -4,6 +4,8 @@ import re
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 from typing import List, Dict, Optional
+import datetime
+import random
 
 def fetch_fund_estimation(code, timeout=5):
     url = f"http://fundgz.1234567.com.cn/js/{code}.js"
@@ -236,3 +238,138 @@ def fetch_fundcode_search(timeout=8) -> Optional[List[Dict[str, str]]]:
         except Exception:
             continue
     return items or None
+
+def fetch_fund_ranking(sc="1n", st="desc", ft="all", *, page=1, page_size=50, sd=None, ed=None, timeout=10):
+    now = datetime.datetime.now()
+    if ed is None:
+        ed = now.date().isoformat()
+    if sd is None:
+        sd = (now.date() - datetime.timedelta(days=30)).isoformat()
+    page = int(page or 1)
+    page_size = int(page_size or 50)
+    if page < 1:
+        page = 1
+    if page_size < 1:
+        page_size = 50
+    v = str(random.random())
+    url = (
+        "https://fund.eastmoney.com/data/rankhandler.aspx"
+        f"?op=ph&dt=kf&ft={ft}&rs=&gs=0&sc={sc}&st={st}"
+        f"&sd={sd}&ed={ed}&qdii=&tabSubtype=,,,,,&pi={page}&pn={page_size}&dx=1&v={v}"
+    )
+    req = Request(url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://fund.eastmoney.com/data/fundranking.html"})
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            text = resp.read().decode("utf-8", errors="ignore")
+    except (HTTPError, URLError):
+        return {"items": [], "all_records": 0}
+    if not text or "rankData" not in text:
+        return {"items": [], "all_records": 0}
+    if "无访问权限" in text:
+        return {"items": [], "all_records": 0}
+    m = re.search(r"datas\s*:\s*\[([\s\S]*?)\]\s*,\s*(?:allRecords|allRecords\s*:)", text)
+    if not m:
+        m = re.search(r"datas\s*:\s*\[([\s\S]*?)\]", text)
+    if not m:
+        return {"items": [], "all_records": 0}
+    body = m.group(1) if m else ""
+    arr = re.findall(r"\"([^\"]*)\"|'([^']*)'", body)
+    rows = []
+    for a, b in arr:
+        s = a or b
+        if s:
+            rows.append(s)
+    am = re.search(r"allRecords\s*:\s*(\d+)", text)
+    all_records = 0
+    if am:
+        try:
+            all_records = int(am.group(1))
+        except Exception:
+            all_records = 0
+    items = []
+    for s in rows:
+        parts = s.split(",")
+        if len(parts) < 7:
+            continue
+        code = (parts[0] or "").strip()
+        name = (parts[1] or "").strip()
+        d = (parts[3] or "").strip() if len(parts) > 3 else ""
+        pct = None
+        try:
+            pct = float((parts[6] or "").strip())
+        except Exception:
+            pct = None
+        if not code:
+            continue
+        items.append({
+            "fundcode": code,
+            "name": name or None,
+            "daily_pct": pct,
+            "daily_pct_date": d or None,
+            "pct_source": "official",
+            "nav_fetched_at": time.strftime("%H:%M"),
+        })
+    return {"items": items, "all_records": all_records}
+
+def fetch_fund_guzhi_list(type_=0, sort="3", order_type="desc", *, canbuy="0", page=1, page_size=50, timeout=10):
+    page = int(page or 1)
+    page_size = int(page_size or 50)
+    if page < 1:
+        page = 1
+    if page_size < 1:
+        page_size = 50
+    url = (
+        "https://api.fund.eastmoney.com/FundGuZhi/GetFundGZList"
+        f"?type={int(type_)}&sort={sort}&orderType={order_type}&canbuy={canbuy}"
+        f"&pageIndex={page}&pageSize={page_size}"
+    )
+    req = Request(url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://fund.eastmoney.com/fundguzhi.html"})
+    try:
+        with urlopen(req, timeout=timeout) as resp:
+            text = resp.read().decode("utf-8", errors="ignore")
+    except (HTTPError, URLError):
+        return {"items": [], "total_count": 0}
+    try:
+        obj = json.loads(text)
+    except Exception:
+        return {"items": [], "total_count": 0}
+    if not isinstance(obj, dict):
+        return {"items": [], "total_count": 0}
+    data = obj.get("Data") or {}
+    if not isinstance(data, dict):
+        return {"items": [], "total_count": 0}
+    rows = data.get("list") or []
+    if not isinstance(rows, list):
+        rows = []
+    items = []
+    now_hm = time.strftime("%H:%M")
+    for it in rows:
+        try:
+            code = str(it.get("bzdm") or "").strip()
+            name = str(it.get("jjjc") or "").strip()
+            pct_raw = it.get("gszzl")
+            pct = None
+            try:
+                if isinstance(pct_raw, (int, float)):
+                    pct = float(pct_raw)
+                else:
+                    s = str(pct_raw or "").replace("%", "").strip()
+                    pct = float(s) if s else None
+            except Exception:
+                pct = None
+            items.append({
+                "fundcode": code,
+                "name": name or None,
+                "daily_pct": pct,
+                "daily_pct_date": (data.get("gxrq") or None),
+                "pct_source": "estimate",
+                "nav_fetched_at": now_hm,
+            })
+        except Exception:
+            continue
+    total_count = 0
+    try:
+        total_count = int((obj or {}).get("TotalCount") or 0)
+    except Exception:
+        total_count = 0
+    return {"items": items, "total_count": total_count}

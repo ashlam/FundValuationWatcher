@@ -3,11 +3,12 @@ import os
 import time
 import threading
 import datetime
+import math
 import secrets
 import sqlite3
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, quote, unquote
-from .eastmoney import fetch_fund_estimation, fetch_fund_profile, fetch_fundcode_search, fetch_latest_nav_change, fetch_nav_change_series
+from .eastmoney import fetch_fund_estimation, fetch_fund_profile, fetch_fundcode_search, fetch_latest_nav_change, fetch_nav_change_series, fetch_fund_ranking, fetch_fund_guzhi_list
 from .db import init_db, get_fund, upsert_fund_profile, upsert_asset_allocations, get_stats, find_fund_code_by_name
 from .users_db import (
     init_users_db,
@@ -25,6 +26,8 @@ from .users_db import (
     delete_user_position_json,
     clear_user_positions_json,
     clear_user_positions_daily,
+    delete_user_positions_daily_for_code,
+    update_user_position_atomic,
     upsert_user_positions_daily,
     get_user_positions_daily,
     sum_daily_profit_by_code,
@@ -65,6 +68,7 @@ INDEX_HTML = """<!doctype html>
 <h1>基金实时估值</h1>
 <div class="nav">
 <a href="/">估值</a>
+<a href="/rank">涨跌榜</a>
 <a href="/upload-portfolio">个人持仓</a>
 <a href="/favorites">自选基金</a>
 <a href="/admin/funds">基金资料维护</a>
@@ -89,11 +93,12 @@ INDEX_HTML = """<!doctype html>
 <thead><tr>
 <th data-key="fundcode">代码</th>
 <th data-key="name">名称</th>
-<th data-key="amount">持有金额 <button id="toggleAmt" class="pbtn" type="button">隐私</button></th>
+<th data-key="principal">持有金额（本金） <button id="togglePrincipal" class="pbtn" type="button">隐私</button></th>
 <th data-key="gszzl">估算涨跌幅</th>
 <th data-key="profit">当日盈亏（金额）</th>
 <th data-key="total_earnings">持有收益金额 <button id="toggleTe" class="pbtn" type="button">隐私</button></th>
 <th data-key="return_rate">持有收益率</th>
+<th data-key="amount">持有金额（市值） <button id="toggleAmt" class="pbtn" type="button">隐私</button></th>
 <th data-key="jzrq">净值日期</th>
 <th data-key="gztime">更新时间</th>
 </tr></thead>
@@ -115,6 +120,7 @@ let lastItems=[]
 let sortKey=null
 let sortAsc=true
 let hideAmount=false
+let hidePrincipal=false
 let hideTotalEarnings=false
 let hideSumAmount=false
 let showSumProfitPct=false
@@ -139,6 +145,7 @@ if(toggleSumProfitModeBtn){
   })
 }
 const toggleAmtBtn=document.getElementById("toggleAmt")
+const togglePrincipalBtn=document.getElementById("togglePrincipal")
 const toggleTeBtn=document.getElementById("toggleTe")
 if(toggleAmtBtn){
   toggleAmtBtn.addEventListener("click", (e)=>{
@@ -146,6 +153,15 @@ if(toggleAmtBtn){
     hideAmount=!hideAmount
     toggleAmtBtn.className="pbtn"+(hideAmount?" on":"")
     toggleAmtBtn.textContent=hideAmount?"显示":"隐私"
+    render(lastItems)
+  })
+}
+if(togglePrincipalBtn){
+  togglePrincipalBtn.addEventListener("click", (e)=>{
+    if(e){ e.stopPropagation() }
+    hidePrincipal=!hidePrincipal
+    togglePrincipalBtn.className="pbtn"+(hidePrincipal?" on":"")
+    togglePrincipalBtn.textContent=hidePrincipal?"显示":"隐私"
     render(lastItems)
   })
 }
@@ -174,13 +190,14 @@ async function initPortfolio(){
     portfolioMap={}
     for(const it of (j.items||[])){
       const c=(it.code||"").trim()
-      const amt=Number(it.amount||0)
       const te=Number(it.total_earnings||0)
+      const principal=Number(it.principal||it.amount||0)
+      const mv=Number(it.market_value||((isFinite(principal)?principal:0)+(isFinite(te)?te:0))||0)
       let rr=0
-      if(amt!==0){
-        rr=(te/amt)*100
+      if(principal!==0){
+        rr=(te/principal)*100
       }
-      if(c){ portfolioMap[c]={amount:amt, total_earnings:te, return_rate:rr} }
+      if(c){ portfolioMap[c]={amount:mv, principal:principal, total_earnings:te, return_rate:rr} }
     }
   }catch(e){
     portfolioMap={}
@@ -238,12 +255,13 @@ function render(items){
       const diffOf=x=>((!isNaN(parseFloat(x.gsz))&&!isNaN(parseFloat(x.dwjz)))?(parseFloat(x.gsz)-parseFloat(x.dwjz)):-99999)
       const pctA=pctOf(a), pctB=pctOf(b)
       const amtA=Number(portfolioMap[cA]?(portfolioMap[cA].amount||0):0), amtB=Number(portfolioMap[cB]?(portfolioMap[cB].amount||0):0)
+      const prA=Number(portfolioMap[cA]?(portfolioMap[cA].principal||0):0), prB=Number(portfolioMap[cB]?(portfolioMap[cB].principal||0):0)
       const profA=isFinite(amtA)&&isFinite(pctA)?(amtA*pctA/100):0
       const profB=isFinite(amtB)&&isFinite(pctB)?(amtB*pctB/100):0
       const teA=Number(portfolioMap[cA]?(portfolioMap[cA].total_earnings||0):0), teB=Number(portfolioMap[cB]?(portfolioMap[cB].total_earnings||0):0)
       const rrA=Number(portfolioMap[cA]?(portfolioMap[cA].return_rate||0):0), rrB=Number(portfolioMap[cB]?(portfolioMap[cB].return_rate||0):0)
-      const valA = key==="amount"?amtA : key==="profit"?profA : key==="total_earnings"?teA : key==="return_rate"?rrA : key==="gszzl"?pctA : key==="fundcode"?String(a.fundcode||"") : key==="name"?String(a.name||"") : key==="jzrq"?String(a.jzrq||"") : key==="gztime"?String(a.gztime||"") : ""
-      const valB = key==="amount"?amtB : key==="profit"?profB : key==="total_earnings"?teB : key==="return_rate"?rrB : key==="gszzl"?pctB : key==="fundcode"?String(b.fundcode||"") : key==="name"?String(b.name||"") : key==="jzrq"?String(b.jzrq||"") : key==="gztime"?String(b.gztime||"") : ""
+      const valA = key==="principal"?prA : key==="amount"?amtA : key==="profit"?profA : key==="total_earnings"?teA : key==="return_rate"?rrA : key==="gszzl"?pctA : key==="fundcode"?String(a.fundcode||"") : key==="name"?String(a.name||"") : key==="jzrq"?String(a.jzrq||"") : key==="gztime"?String(a.gztime||"") : ""
+      const valB = key==="principal"?prB : key==="amount"?amtB : key==="profit"?profB : key==="total_earnings"?teB : key==="return_rate"?rrB : key==="gszzl"?pctB : key==="fundcode"?String(b.fundcode||"") : key==="name"?String(b.name||"") : key==="jzrq"?String(b.jzrq||"") : key==="gztime"?String(b.gztime||"") : ""
       let cmp=0
       if(typeof valA==="number" && typeof valB==="number"){ cmp = (valA - valB) }
       else { cmp = String(valA).localeCompare(String(valB), "zh-CN", {numeric:true}) }
@@ -258,24 +276,27 @@ function render(items){
     const c=(it.fundcode||"").trim()
     const pItem = portfolioMap[c] || {}
     const amt=Number(pItem.amount||0)
+    const principal=Number(pItem.principal||0)
     const todayProfit=(isFinite(amt)&&isFinite(pct))?(amt*pct/100):0
     if(isFinite(amt)) sumAmt+=amt
   if(isFinite(todayProfit)) sumProfit+=todayProfit
   
   const te = Number(pItem.total_earnings), rr = Number(pItem.return_rate)
   const teCls = (!hideTotalEarnings && isFinite(te)) ? (te>=0?"pos":"neg") : ""
+  const mvCls = isFinite(te) ? (te>=0?"pos":"neg") : ""
   const rrCls = isFinite(rr) ? (rr>=0?"pos":"neg") : ""
   const teStr = isFinite(te) ? (te>=0?"+"+te.toFixed(2):te.toFixed(2)) : "-"
   const rrStr = isFinite(rr) ? (rr>=0?"+"+rr.toFixed(2)+"%":rr.toFixed(2)+"%") : "-"
 
-  const amtStr = hideAmount ? "****" : (amt?amt.toFixed(2):"")
+  const principalStr = hidePrincipal ? "****" : (isFinite(principal) ? (principal?principal.toFixed(2):"") : "")
+  const amtStr = hideAmount ? "****" : (isFinite(amt)?(amt?amt.toFixed(2):""):"")
         const teShow = hideTotalEarnings ? "****" : teStr
         const timeStr = (it.pct_source==="official" && it.nav_fetched_at) ? fmt(it.nav_fetched_at) : fmt(it.gztime)
         const timeCls = (it.pct_source==="official" && it.nav_fetched_at) ? "navts" : ""
         const todayStr = new Date().toISOString().slice(0,10)
         const jzDate = (it.pct_source==="official" && it.daily_pct_date) ? it.daily_pct_date : it.jzrq
         const jzCls = (String(jzDate||"")===todayStr) ? "jztoday" : ""
-        tr.innerHTML=`<td>${fmt(it.fundcode)}</td><td>${fmt(it.name)}</td><td>${amtStr}</td><td class="${cls}">${pct}%</td><td class="${todayProfit>=0?"pos":"neg"}">${amt?todayProfit.toFixed(2):""}</td><td class="${teCls}">${teShow}</td><td class="${rrCls}">${rrStr}</td><td class="${jzCls}">${fmt(jzDate)}</td><td class="${timeCls}">${timeStr}</td>`
+        tr.innerHTML=`<td>${fmt(it.fundcode)}</td><td>${fmt(it.name)}</td><td>${principalStr}</td><td class="${cls}">${pct}%</td><td class="${todayProfit>=0?"pos":"neg"}">${amt?todayProfit.toFixed(2):""}</td><td class="${teCls}">${teShow}</td><td class="${rrCls}">${rrStr}</td><td class="${mvCls}">${amtStr}</td><td class="${jzCls}">${fmt(jzDate)}</td><td class="${timeCls}">${timeStr}</td>`
         tbody.appendChild(tr)
       }
       if(sumAmountEl) sumAmountEl.textContent = hideSumAmount ? "****" : (sumAmt ? sumAmt.toFixed(2) : "0.00")
@@ -344,11 +365,12 @@ loadMyBtn.addEventListener("click",async ()=>{
       const c=(it.code||"").trim()
       const amt=Number(it.amount||0)
       const te=Number(it.total_earnings||0)
+      const mv=amt+te
       let rr=0
       if(amt!==0){
         rr=(te/amt)*100
       }
-      if(c){ portfolioMap[c]={amount:amt, total_earnings:te, return_rate:rr} }
+      if(c){ portfolioMap[c]={amount:mv, principal:amt, total_earnings:te, return_rate:rr} }
     }
     if(codes.length===0){
       alert("当前个人持仓没有基金代码，无法拉取估值。请在个人持仓页按基金代码新增，或导入包含 code 字段的 JSON。")
@@ -391,12 +413,14 @@ th,td{border-bottom:1px solid #eee;padding:8px;text-align:left;font-size:14px}
 .tab{padding:8px 12px;border:1px solid #ddd;border-bottom:none;border-radius:6px 6px 0 0;background:#fff;color:#666}
 .tab.active{background:#f5f5f5}
 .panel{border:1px solid #eee;border-radius:0 6px 6px 6px;padding:12px}
+th[data-key]{cursor:pointer}
 </style>
 </head>
 <body>
 <h1>上传个人基金持仓</h1>
 <div class="nav">
 <a href="/">估值</a>
+<a href="/rank">涨跌榜</a>
 <a href="/upload-portfolio">个人持仓</a>
 <a href="/favorites">自选基金</a>
 <a href="/admin/funds">基金资料维护</a>
@@ -470,7 +494,7 @@ th,td{border-bottom:1px solid #eee;padding:8px;text-align:left;font-size:14px}
 <span class="muted" id="status"></span>
 </div>
 <table>
-<thead><tr><th style="width:40px"><input id="selectAll" type="checkbox" /></th><th>代码</th><th>基金</th><th>金额</th><th>持有收益</th><th>更新日期</th></tr></thead>
+<thead><tr><th style="width:40px"><input id="selectAll" type="checkbox" /></th><th data-key="code">代码</th><th data-key="fund_name">基金</th><th data-key="amount">本金</th><th data-key="total_earnings">持有收益</th><th data-key="market_value">当前市值</th><th data-key="updated_at">更新日期</th><th>操作</th></tr></thead>
 <tbody id="tbody"></tbody>
 </table>
 <div class="row" style="justify-content:flex-end">
@@ -531,6 +555,29 @@ const btnBackfill=document.getElementById("btnBackfill")
 const btnDeleteSelected=document.getElementById("btnDeleteSelected")
 const selectAll=document.getElementById("selectAll")
 let selectedCodes = new Set()
+let lastItems = []
+let sortKey = null
+let sortAsc = true
+function _cmpVals(a, b){
+  if(typeof a === "number" && typeof b === "number"){
+    return a - b
+  }
+  return String(a).localeCompare(String(b), "zh-CN", {numeric:true})
+}
+function setSort(k){
+  const key = String(k || "").trim()
+  if(!key) return
+  if(sortKey === key){
+    sortAsc = !sortAsc
+  }else{
+    sortKey = key
+    sortAsc = true
+  }
+  render(lastItems)
+}
+document.querySelectorAll("thead th[data-key]").forEach(th=>{
+  th.addEventListener("click", ()=>setSort(th.getAttribute("data-key")))
+})
 if(btnLoadMyPortfolio){
   btnLoadMyPortfolio.addEventListener("click", loadList)
 }
@@ -592,17 +639,36 @@ const addItem=document.getElementById("addItem")
 // 已移除图片预览
 function render(items){
   tbody.innerHTML=""
-  for(const it of items||[]){
+  lastItems = Array.isArray(items) ? items.slice() : []
+  if(sortKey){
+    const key = sortKey
+    lastItems.sort((a, b)=>{
+      const av = a || {}, bv = b || {}
+      const amtA = Number(av.amount)
+      const teA = Number(av.total_earnings)
+      const mvA = (isFinite(amtA)?amtA:0) + (isFinite(teA)?teA:0)
+      const amtB = Number(bv.amount)
+      const teB = Number(bv.total_earnings)
+      const mvB = (isFinite(amtB)?amtB:0) + (isFinite(teB)?teB:0)
+      const valA = key==="code" ? String(av.code||"") : key==="fund_name" ? String(av.fund_name||"") : key==="amount" ? (isFinite(amtA)?amtA:0) : key==="total_earnings" ? (isFinite(teA)?teA:0) : key==="market_value" ? mvA : key==="updated_at" ? (isFinite(Number(av.updated_at))?Number(av.updated_at):0) : ""
+      const valB = key==="code" ? String(bv.code||"") : key==="fund_name" ? String(bv.fund_name||"") : key==="amount" ? (isFinite(amtB)?amtB:0) : key==="total_earnings" ? (isFinite(teB)?teB:0) : key==="market_value" ? mvB : key==="updated_at" ? (isFinite(Number(bv.updated_at))?Number(bv.updated_at):0) : ""
+      const cmp = _cmpVals(valA, valB)
+      return sortAsc ? cmp : -cmp
+    })
+  }
+  for(const it of lastItems){
     const tr=document.createElement("tr")
     const te=Number(it.total_earnings)
     const teCls = isFinite(te) ? (te>=0?"pos":"neg") : ""
+    const amt = Number(it.amount)
+    const mv = (isFinite(amt)?amt:0) + (isFinite(te)?te:0)
     const code = (it.code||"")
     const checked = selectedCodes.has(code)
     tr.setAttribute("data-code", code)
     tr.setAttribute("data-amount", String(it.amount??""))
     tr.setAttribute("data-total-earnings", String(it.total_earnings??""))
     tr.setAttribute("data-fund-name", String(it.fund_name||""))
-    tr.innerHTML=`<td><input class="sel" type="checkbox" data-code="${code}" ${checked?"checked":""} /></td><td>${code}</td><td>${it.fund_name||""}</td><td>${it.amount??""}</td><td class="${teCls}">${it.total_earnings??""}</td><td>${fmtTs(it.updated_at)}</td>
+    tr.innerHTML=`<td><input class="sel" type="checkbox" data-code="${code}" ${checked?"checked":""} /></td><td>${code}</td><td>${it.fund_name||""}</td><td>${it.amount??""}</td><td class="${teCls}">${it.total_earnings??""}</td><td>${isFinite(mv)?mv.toFixed(2):""}</td><td>${fmtTs(it.updated_at)}</td>
     <td>
       <button class="edit" data-code="${it.code||""}">修改</button>
       <button class="del" data-code="${it.code||""}">删除</button>
@@ -649,7 +715,7 @@ function render(items){
         tds[4].innerHTML=""
         tds[4].appendChild(teInput)
         btn.textContent="保存"
-        const actionTd = tds[6]
+        const actionTd = tds[7]
         const cancelBtn = document.createElement("button")
         cancelBtn.className = "cancel"
         cancelBtn.textContent = "取消"
@@ -701,6 +767,10 @@ function render(items){
       await fetch("/api/admin/portfolio/delete",{method:"POST",headers:{"Content-Type":"application/x-www-form-urlencoded"},body:body.toString()})
       loadList()
     })
+  }
+  if(selectAll){
+    const all = Array.from(tbody.querySelectorAll("input.sel"))
+    selectAll.checked = (all.length>0 && all.every(x=>x.checked))
   }
 }
 async function loadList(){
@@ -1093,12 +1163,14 @@ th,td{border-bottom:1px solid #eee;padding:8px;text-align:left;font-size:14px}
 .pos{color:#d93025}
 .neg{color:#0b8f2d}
 .panel{border:1px solid #eee;border-radius:8px;padding:12px}
+th[data-key]{cursor:pointer}
 </style>
 </head>
 <body>
 <h1>自选基金</h1>
 <div class="nav">
 <a href="/">估值</a>
+<a href="/rank">涨跌榜</a>
 <a href="/upload-portfolio">个人持仓</a>
 <a href="/favorites">自选基金</a>
 <a href="/admin/funds">基金资料维护</a>
@@ -1119,7 +1191,7 @@ th,td{border-bottom:1px solid #eee;padding:8px;text-align:left;font-size:14px}
 <div class="row"><strong>查找基金</strong></div>
 <div class="row"><input id="searchQ" placeholder="基金代码或名称（支持模糊）" /><button id="btnSearch">搜索</button></div>
 <table>
-<thead><tr><th>代码</th><th>名称</th><th>操作</th></tr></thead>
+<thead><tr><th data-key="code">代码</th><th data-key="name">名称</th><th>操作</th></tr></thead>
 <tbody id="searchTbody"></tbody>
 </table>
 <div class="row"><button id="searchPrev">上一页</button><span id="searchPageStatus" class="muted" style="margin:0 8px"></span><button id="searchNext">下一页</button></div>
@@ -1127,7 +1199,7 @@ th,td{border-bottom:1px solid #eee;padding:8px;text-align:left;font-size:14px}
 <div class="row" style="margin-top:12px"><strong>我的自选</strong><span class="muted" style="margin-left:8px" id="favStatus"></span><button id="btnClear" style="margin-left:auto;background:#b3261e;border-color:#b3261e">清空</button></div>
 <div class="row"><button id="btnImportFromDist">从发行版数据库导入</button></div>
 <table>
-<thead><tr><th>代码</th><th>名称</th><th>今日涨跌</th><th>备注</th><th>创建时间</th><th>更新</th><th>操作</th></tr></thead>
+<thead><tr><th data-key="code">代码</th><th data-key="fund_name">名称</th><th data-key="daily_pct">今日涨跌</th><th data-key="note">备注</th><th data-key="created_at">创建时间</th><th data-key="updated_at">更新</th><th>操作</th></tr></thead>
 <tbody id="favTbody"></tbody>
 </table>
 <div class="row"><button id="favPrev">上一页</button><span id="favPageStatus" class="muted" style="margin:0 8px"></span><button id="favNext">下一页</button></div>
@@ -1166,6 +1238,91 @@ const searchNext=document.getElementById("searchNext")
 const searchPageStatus=document.getElementById("searchPageStatus")
 let favItems=[], favPage=1, favPageSize=30
 let searchItems=[], searchPage=1, searchPageSize=15
+let favSortKey=null, favSortAsc=true
+let searchSortKey=null, searchSortAsc=true
+function _cmpVals(a, b){
+  if(typeof a === "number" && typeof b === "number"){
+    return a - b
+  }
+  return String(a).localeCompare(String(b), "zh-CN", {numeric:true})
+}
+function sortedFavItems(){
+  const arr = Array.isArray(favItems) ? favItems.slice() : []
+  if(!favSortKey) return arr
+  const key = favSortKey
+  arr.sort((a, b)=>{
+    const av=a||{}, bv=b||{}
+    const pctA = (typeof av.daily_pct==="number") ? av.daily_pct : -99999
+    const pctB = (typeof bv.daily_pct==="number") ? bv.daily_pct : -99999
+    const valA = key==="code" ? String(av.code||"") : key==="fund_name" ? String(av.fund_name||"") : key==="daily_pct" ? pctA : key==="note" ? String(av.note||"") : key==="created_at" ? Number(av.created_at||0) : key==="updated_at" ? Number(av.updated_at||0) : ""
+    const valB = key==="code" ? String(bv.code||"") : key==="fund_name" ? String(bv.fund_name||"") : key==="daily_pct" ? pctB : key==="note" ? String(bv.note||"") : key==="created_at" ? Number(bv.created_at||0) : key==="updated_at" ? Number(bv.updated_at||0) : ""
+    const cmp = _cmpVals(valA, valB)
+    return favSortAsc ? cmp : -cmp
+  })
+  return arr
+}
+function sortedSearchItems(){
+  const arr = Array.isArray(searchItems) ? searchItems.slice() : []
+  if(!searchSortKey) return arr
+  const key = searchSortKey
+  arr.sort((a, b)=>{
+    const av=a||{}, bv=b||{}
+    const valA = key==="code" ? String(av.code||"") : key==="name" ? String(av.name||"") : ""
+    const valB = key==="code" ? String(bv.code||"") : key==="name" ? String(bv.name||"") : ""
+    const cmp = _cmpVals(valA, valB)
+    return searchSortAsc ? cmp : -cmp
+  })
+  return arr
+}
+function setSort(scope, keyRaw){
+  const key = String(keyRaw||"").trim()
+  if(!key) return
+  if(scope==="fav"){
+    if(favSortKey===key) favSortAsc=!favSortAsc
+    else { favSortKey=key; favSortAsc=true }
+    renderFavPage()
+  }else{
+    if(searchSortKey===key) searchSortAsc=!searchSortAsc
+    else { searchSortKey=key; searchSortAsc=true }
+    renderSearchPage()
+  }
+}
+const favTable = favTbody ? favTbody.closest("table") : null
+const searchTable = searchTbody ? searchTbody.closest("table") : null
+if(favTable){
+  favTable.querySelectorAll("thead th[data-key]").forEach(th=>{
+    th.addEventListener("click", ()=>setSort("fav", th.getAttribute("data-key")))
+  })
+}
+if(searchTable){
+  searchTable.querySelectorAll("thead th[data-key]").forEach(th=>{
+    th.addEventListener("click", ()=>setSort("search", th.getAttribute("data-key")))
+  })
+}
+function renderFavPage(){
+  const arr = sortedFavItems()
+  const total = arr.length
+  const pages = Math.max(1, Math.ceil(total/favPageSize))
+  favPage = Math.min(Math.max(1, favPage), pages)
+  const start = (favPage-1)*favPageSize
+  const end = start + favPageSize
+  renderFav(arr.slice(start, end))
+  if(favPageStatus) favPageStatus.textContent = `${favPage}/${pages}`
+  if(favPrev) favPrev.disabled = (favPage<=1)
+  if(favNext) favNext.disabled = (favPage>=pages)
+}
+function renderSearchPage(){
+  const arr = sortedSearchItems()
+  const total = arr.length
+  const pages = Math.max(1, Math.ceil(total/searchPageSize))
+  searchPage = Math.min(Math.max(1, searchPage), pages)
+  const start = (searchPage-1)*searchPageSize
+  const end = start + searchPageSize
+  renderSearch(arr.slice(start, end))
+  if(searchPageStatus) searchPageStatus.textContent = `${searchPage}/${pages}`
+  if(searchPrev) searchPrev.disabled = (searchPage<=1)
+  if(searchNext) searchNext.disabled = (searchPage>=pages)
+}
 function renderFav(items){
   favTbody.innerHTML=""
   for(const it of items||[]){
@@ -1272,15 +1429,7 @@ async function loadFav(){
         }
       }catch(e){}
     }
-    const total=favItems.length
-    const pages=Math.max(1, Math.ceil(total/favPageSize))
-    favPage=Math.min(Math.max(1, favPage), pages)
-    const start=(favPage-1)*favPageSize
-    const end=start+favPageSize
-    renderFav(favItems.slice(start,end))
-    if(favPageStatus) favPageStatus.textContent = `${favPage}/${pages}`
-    if(favPrev) favPrev.disabled = (favPage<=1)
-    if(favNext) favNext.disabled = (favPage>=pages)
+    renderFavPage()
     favStatus.textContent = `共 ${((j.items||[]).length)} 条`
   }catch(e){
     renderFav([])
@@ -1381,62 +1530,31 @@ btnSearch.addEventListener("click", async ()=>{
     const r=await fetch("/api/search?q="+encodeURIComponent(q), {cache:"no-store"})
     const j=await r.json()
     searchItems=(j.items||[])
-    const total=searchItems.length
-    const pages=Math.max(1, Math.ceil(total/searchPageSize))
     searchPage=1
-    const start=(searchPage-1)*searchPageSize
-    const end=start+searchPageSize
-    renderSearch(searchItems.slice(start,end))
-    if(searchPageStatus) searchPageStatus.textContent = `${searchPage}/${pages}`
-    if(searchPrev) searchPrev.disabled = (searchPage<=1)
-    if(searchNext) searchNext.disabled = (searchPage>=pages)
+    renderSearchPage()
   }catch(e){
     renderSearch([])
   }
 })
 if(searchPrev) searchPrev.addEventListener("click", ()=>{
-  const total=searchItems.length
-  const pages=Math.max(1, Math.ceil(total/searchPageSize))
   searchPage=Math.max(1, searchPage-1)
-  const start=(searchPage-1)*searchPageSize
-  const end=start+searchPageSize
-  renderSearch(searchItems.slice(start,end))
-  if(searchPageStatus) searchPageStatus.textContent = `${searchPage}/${pages}`
-  if(searchPrev) searchPrev.disabled = (searchPage<=1)
-  if(searchNext) searchNext.disabled = (searchPage>=pages)
+  renderSearchPage()
 })
 if(searchNext) searchNext.addEventListener("click", ()=>{
   const total=searchItems.length
   const pages=Math.max(1, Math.ceil(total/searchPageSize))
   searchPage=Math.min(pages, searchPage+1)
-  const start=(searchPage-1)*searchPageSize
-  const end=start+searchPageSize
-  renderSearch(searchItems.slice(start,end))
-  if(searchPageStatus) searchPageStatus.textContent = `${searchPage}/${pages}`
-  if(searchPrev) searchPrev.disabled = (searchPage<=1)
-  if(searchNext) searchNext.disabled = (searchPage>=pages)
+  renderSearchPage()
 })
 if(favPrev) favPrev.addEventListener("click", ()=>{
-  const total=favItems.length
-  const pages=Math.max(1, Math.ceil(total/favPageSize))
   favPage=Math.max(1, favPage-1)
-  const start=(favPage-1)*favPageSize
-  const end=start+favPageSize
-  renderFav(favItems.slice(start,end))
-  if(favPageStatus) favPageStatus.textContent = `${favPage}/${pages}`
-  if(favPrev) favPrev.disabled = (favPage<=1)
-  if(favNext) favNext.disabled = (favPage>=pages)
+  renderFavPage()
 })
 if(favNext) favNext.addEventListener("click", ()=>{
   const total=favItems.length
   const pages=Math.max(1, Math.ceil(total/favPageSize))
   favPage=Math.min(pages, favPage+1)
-  const start=(favPage-1)*favPageSize
-  const end=start+favPageSize
-  renderFav(favItems.slice(start,end))
-  if(favPageStatus) favPageStatus.textContent = `${favPage}/${pages}`
-  if(favPrev) favPrev.disabled = (favPage<=1)
-  if(favNext) favNext.disabled = (favPage>=pages)
+  renderFavPage()
 })
 document.getElementById("btnClear").addEventListener("click", async ()=>{
   if(!confirm("确定清空我的自选基金吗？")) return
@@ -1454,6 +1572,215 @@ loadFav()
 </body>
 </html>
 """
+
+RANK_HTML = """<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>全市场盘中估值 Top10</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body{font-family:system-ui,-apple-system,Segoe UI,Roboto,Arial;max-width:900px;margin:24px auto;padding:0 16px;color:#666}
+h1{font-size:22px;margin:0 0 12px;color:#666}
+.row{display:flex;gap:8px;margin:12px 0;align-items:center}
+button{padding:8px 12px;border:1px solid #1a73e8;background:#1a73e8;color:#fff;border-radius:6px}
+table{width:100%;border-collapse:collapse;margin-top:12px;color:#666}
+th,td{border-bottom:1px solid #eee;padding:8px;text-align:left;font-size:14px}
+.pos{color:#d93025}
+.neg{color:#0b8f2d}
+.muted{color:#888}
+.nav{display:flex;gap:12px;padding:8px 0;border-bottom:1px solid #eee;margin-bottom:12px}
+.nav a{color:#1a73e8;text-decoration:none}
+.grid{display:grid;grid-template-columns:1fr;gap:16px}
+@media(min-width:860px){.grid{grid-template-columns:1fr 1fr}}
+.card{border:1px solid #eee;border-radius:10px;padding:12px}
+.card h2{font-size:16px;margin:0 0 8px;color:#666}
+</style>
+</head>
+<body>
+<h1>全市场盘中估值 Top10</h1>
+<div class="nav">
+<a href="/">估值</a>
+<a href="/rank">涨跌榜</a>
+<a href="/upload-portfolio">个人持仓</a>
+<a href="/favorites">自选基金</a>
+<a href="/admin/funds">基金资料维护</a>
+<span style="margin-left:auto" id="authLinks"></span>
+</div>
+<div class="row">
+<button id="refresh">刷新</button>
+<span class="muted" id="meta"></span>
+</div>
+<div class="row">
+<span class="muted">统计范围：全市场（盘中估算涨跌幅）</span>
+</div>
+<div class="grid">
+<div class="card">
+<h2>估值涨幅 Top10</h2>
+<table><thead><tr><th>代码</th><th>名称</th><th>当日涨跌</th><th>来源</th><th>更新时间</th></tr></thead><tbody id="upTbody"></tbody></table>
+</div>
+<div class="card">
+<h2>估值跌幅 Top10</h2>
+<table><thead><tr><th>代码</th><th>名称</th><th>当日涨跌</th><th>来源</th><th>更新时间</th></tr></thead><tbody id="downTbody"></tbody></table>
+</div>
+<div class="card">
+<h2>卖出 Top10（以 1 万元为例，按估值盈亏金额）</h2>
+<table><thead><tr><th>代码</th><th>名称</th><th>当日盈亏</th><th>当日涨跌</th><th>参考本金</th></tr></thead><tbody id="sellTbody"></tbody></table>
+</div>
+<div class="card">
+<h2>买入 Top10（以 1 万元为例，按估值盈亏金额）</h2>
+<table><thead><tr><th>代码</th><th>名称</th><th>当日盈亏</th><th>当日涨跌</th><th>参考本金</th></tr></thead><tbody id="buyTbody"></tbody></table>
+</div>
+</div>
+<script>
+async function initAuthLinks(){
+  const el=document.getElementById("authLinks")
+  if(!el) return
+  try{
+    const r=await fetch("/api/session",{cache:"no-store"})
+    const j=await r.json()
+    if(j && j.logged_in){
+      const uname=String(j.username||"")
+      el.innerHTML = `<span class="muted">用户：${uname}</span> <a href="/switch-user">切换用户</a> <a href="/logout">登出</a>` + (j.is_super?` <a href="/admin/users">管理用户</a>`:"")
+    }else{
+      el.innerHTML = `<a href="/login">登录</a> <a href="/register">注册</a>`
+    }
+  }catch(e){}
+}
+function fmtPct(x){
+  if(x===undefined||x===null) return ""
+  const n=Number(x)
+  if(!isFinite(n)) return ""
+  return (n>=0?"+":"")+n.toFixed(2)+"%"
+}
+function clsPct(x){
+  const n=Number(x)
+  if(!isFinite(n)) return ""
+  return n>=0?"pos":"neg"
+}
+function fmtNum(x){
+  const n=Number(x)
+  if(!isFinite(n)) return ""
+  return (n>=0?"+":"")+n.toFixed(2)
+}
+function renderPctList(tbody, items){
+  tbody.innerHTML=""
+  for(const it of items||[]){
+    const tr=document.createElement("tr")
+    const pct=fmtPct(it.daily_pct)
+    const src=(it.pct_source||"") + (it.daily_pct_date?`(${it.daily_pct_date})`:"")
+    const ut=(it.gztime||it.nav_fetched_at||"")
+    tr.innerHTML = `<td>${it.fundcode||it.code||""}</td><td>${it.name||""}</td><td class="${clsPct(it.daily_pct)}">${pct}</td><td>${src}</td><td>${ut}</td>`
+    tbody.appendChild(tr)
+  }
+}
+function renderTradeList(tbody, items){
+  tbody.innerHTML=""
+  for(const it of items||[]){
+    const tr=document.createElement("tr")
+    tr.innerHTML = `<td>${it.fundcode||it.code||""}</td><td>${it.name||""}</td><td class="${clsPct(it.profit_est)}">${fmtNum(it.profit_est)}</td><td class="${clsPct(it.daily_pct)}">${fmtPct(it.daily_pct)}</td><td>${it.market_value===undefined||it.market_value===null?"":Number(it.market_value).toFixed(2)}</td>`
+    tbody.appendChild(tr)
+  }
+}
+async function load(){
+  const meta=document.getElementById("meta")
+  try{
+    if(meta) meta.textContent="加载中..."
+    const r=await fetch("/api/rank/daily_top10",{cache:"no-store"})
+    const j=await r.json()
+    renderPctList(document.getElementById("upTbody"), j.top_up||[])
+    renderPctList(document.getElementById("downTbody"), j.top_down||[])
+    renderTradeList(document.getElementById("sellTbody"), j.sell_top||[])
+    renderTradeList(document.getElementById("buyTbody"), j.buy_top||[])
+    if(meta) meta.textContent = `基金数：${j.universe_size||0}，更新时间：${j.generated_at||""}`
+  }catch(e){
+    renderPctList(document.getElementById("upTbody"), [])
+    renderPctList(document.getElementById("downTbody"), [])
+    renderTradeList(document.getElementById("sellTbody"), [])
+    renderTradeList(document.getElementById("buyTbody"), [])
+    if(meta) meta.textContent="加载失败"
+  }
+}
+document.getElementById("refresh").addEventListener("click", load)
+window.addEventListener("load", async ()=>{
+  await initAuthLinks()
+  load()
+})
+</script>
+</body>
+</html>
+"""
+
+def _build_fund_daily_item(code, now):
+    obj = get_fund(code) or {}
+    est = fetch_fund_estimation(code)
+    if est:
+        obj.update(est)
+    after_close = now.hour >= 18
+    navc = fetch_latest_nav_change(code) if after_close else None
+    today_str = now.date().isoformat()
+    use_official = navc and (navc.get("pct") is not None) and (navc.get("date") == today_str)
+    if use_official:
+        try:
+            obj["daily_pct"] = float(navc.get("pct"))
+        except Exception:
+            obj["daily_pct"] = None
+        obj["daily_pct_date"] = navc.get("date")
+        obj["pct_source"] = "official"
+        obj["nav_fetched_at"] = now.strftime("%H:%M")
+    else:
+        try:
+            obj["daily_pct"] = float((est or {}).get("gszzl") or 0.0)
+        except Exception:
+            obj["daily_pct"] = None
+        obj["pct_source"] = "estimate"
+    if "fundcode" not in obj:
+        obj["fundcode"] = code
+    if "name" not in obj or not obj.get("name"):
+        obj["name"] = (est or {}).get("name") or obj.get("fund_name")
+    return obj
+
+def _safe_float(x, default=0.0):
+    try:
+        if x is None:
+            return default
+        return float(x)
+    except Exception:
+        return default
+
+_auto_backfill_done = {}
+_rank_cache = {}
+
+
+def _maybe_auto_backfill(user_id, *, max_positions=30):
+    try:
+        uid = int(user_id)
+    except Exception:
+        return False
+    now = datetime.datetime.now()
+    today = now.date().isoformat()
+    last = _auto_backfill_done.get(uid)
+    if last == today:
+        return False
+    try:
+        items = get_user_positions_json(uid) or []
+        codes = []
+        for it in items:
+            cd = str(it.get("code") or "").strip()
+            if cd and not cd.startswith("NOCODE:"):
+                codes.append(cd)
+        if not codes:
+            _auto_backfill_done[uid] = today
+            return False
+        if len(codes) > int(max_positions or 0):
+            return False
+        r = backfill_positions_for_user(uid, None, today, recompute_total_earnings=False)
+        if r and r.get("ok"):
+            _auto_backfill_done[uid] = today
+            return True
+        return False
+    except Exception:
+        return False
 
 class Handler(BaseHTTPRequestHandler):
     def _send_json(self, obj, status=200, extra_headers=None):
@@ -1697,6 +2024,12 @@ if(loginLink){
                 return
             self._send_html(INDEX_HTML)
             return
+        if p.path == "/rank":
+            u = self._require_login_page("/rank")
+            if not u:
+                return
+            self._send_html(RANK_HTML)
+            return
         if p.path == "/api/config":
             try:
                 cfg = get_config()
@@ -1890,6 +2223,65 @@ if(loginLink){
                 return
             self._send_json({"items": get_user_favorites(u.get("id"))})
             return
+        if p.path == "/api/rank/daily_top10":
+            u = self._require_login_api()
+            if not u:
+                return
+            now = datetime.datetime.now()
+            ck = _rank_cache.get("guzhi_top10") or {}
+            if ck and (now.timestamp() - float(ck.get("ts") or 0)) < 8:
+                self._send_json(ck.get("payload") or {"ok": True, "universe_size": 0, "generated_at": now.strftime("%H:%M:%S"), "top_up": [], "top_down": [], "sell_top": [], "buy_top": []})
+                return
+            up = fetch_fund_guzhi_list(0, "3", "desc", page=1, page_size=10)
+            down = fetch_fund_guzhi_list(0, "3", "asc", page=1, page_size=10)
+            top_up = (up or {}).get("items") or []
+            top_down = (down or {}).get("items") or []
+            universe_size = (up or {}).get("total_count") or (down or {}).get("total_count") or 0
+            base = 10000.0
+            sell_top = []
+            for x in top_up:
+                y = dict(x or {})
+                pct = y.get("daily_pct")
+                prof = None
+                try:
+                    if pct is not None and isinstance(pct, (int, float)):
+                        pv = float(pct)
+                        if math.isfinite(pv):
+                            prof = float(base) * pv / 100.0
+                except Exception:
+                    prof = None
+                y["principal"] = base
+                y["market_value"] = base
+                y["profit_est"] = prof
+                sell_top.append(y)
+            buy_top = []
+            for x in top_down:
+                y = dict(x or {})
+                pct = y.get("daily_pct")
+                prof = None
+                try:
+                    if pct is not None and isinstance(pct, (int, float)):
+                        pv = float(pct)
+                        if math.isfinite(pv):
+                            prof = float(base) * pv / 100.0
+                except Exception:
+                    prof = None
+                y["principal"] = base
+                y["market_value"] = base
+                y["profit_est"] = prof
+                buy_top.append(y)
+            payload = {
+                "ok": True,
+                "universe_size": int(universe_size or 0),
+                "generated_at": now.strftime("%H:%M:%S"),
+                "top_up": top_up,
+                "top_down": top_down,
+                "sell_top": sell_top,
+                "buy_top": buy_top,
+            }
+            _rank_cache["guzhi_top10"] = {"ts": now.timestamp(), "payload": payload}
+            self._send_json(payload)
+            return
         if p.path == "/api/funds":
             u = self._require_login_api()
             if not u:
@@ -1992,7 +2384,17 @@ if(loginLink){
             u = self._require_login_api()
             if not u:
                 return
-            self._send_json({"items": get_user_positions_json(u.get("id"))})
+            _maybe_auto_backfill(u.get("id"))
+            raw = get_user_positions_json(u.get("id")) or []
+            items = []
+            for it in raw:
+                amt = _safe_float(it.get("amount"), 0.0)
+                te = _safe_float(it.get("total_earnings"), 0.0)
+                obj = dict(it)
+                obj["principal"] = amt
+                obj["market_value"] = amt + te
+                items.append(obj)
+            self._send_json({"items": items})
             return
         if p.path == "/api/admin/portfolio/codes":
             u = self._require_login_api()
@@ -2514,6 +2916,7 @@ document.querySelectorAll("button.del").forEach(btn=>{
             tee = float(te) if te else None
             rr = float(rate) if rate else None
             upsert_user_positions_json(u.get("id"), [{"code": code, "fund_name": fund_name or None, "amount": amt, "earnings_yesterday": eyy, "total_earnings": tee, "return_rate": rr, "notes": (notes or None)}])
+            delete_user_positions_daily_for_code(u.get("id"), code)
             self._send_json({"ok": True})
             return
         if p.path == "/api/admin/portfolio/update":
@@ -2593,11 +2996,23 @@ document.querySelectorAll("button.del").forEach(btn=>{
                 "notes": (nt if nt != "" else cur.get("notes")) or None,
             }
             
-
+            should_invalidate_daily = False
             if target_code != code:
-                delete_user_position_json(u.get("id"), code)
-            upsert_user_positions_json(u.get("id"), [payload])
-            self._send_json({"ok": True})
+                should_invalidate_daily = True
+            if str(amt or "").strip() != "" or str(te or "").strip() != "":
+                should_invalidate_daily = True
+            if should_invalidate_daily:
+                delete_user_positions_daily_for_code(u.get("id"), code)
+                delete_user_positions_daily_for_code(u.get("id"), target_code)
+
+            invalidate = []
+            if should_invalidate_daily:
+                invalidate = [code, target_code]
+            ok = update_user_position_atomic(u.get("id"), code, payload, invalidate_codes=invalidate)
+            if ok:
+                self._send_json({"ok": True})
+            else:
+                self._send_json({"ok": False, "error": "update_failed"}, status=500)
             return
         if p.path == "/api/admin/portfolio/delete":
             u = self._require_login_api()
@@ -2837,7 +3252,7 @@ def get_settlement_status():
     ts = _last_settlement_info.get("ts")
     return {"ok": True, "last_date": d, "last_ts": ts}
 
-def backfill_positions_for_user(user_id, start_date=None, end_date=None):
+def backfill_positions_for_user(user_id, start_date=None, end_date=None, *, recompute_total_earnings=True):
     user_id = int(user_id)
     now = datetime.datetime.now().date()
     if end_date:
@@ -2912,26 +3327,29 @@ def backfill_positions_for_user(user_id, start_date=None, end_date=None):
     for d, arr in sorted(day_map.items()):
         upsert_user_positions_daily(user_id, arr, d, "close")
         total_written += len(arr)
-    sums = sum_all_profit_by_code(user_id) or {}
-    cur_items = get_user_positions_json(user_id) or []
-    to_write = []
-    for it in cur_items:
-        code = str(it.get("code") or "").strip()
-        if not code:
-            continue
-        total = float(sums.get(code) or 0.0)
-        to_write.append({
-            "code": code,
-            "fund_name": it.get("fund_name"),
-            "amount": it.get("amount"),
-            "earnings_yesterday": it.get("earnings_yesterday"),
-            "total_earnings": total,
-            "return_rate": it.get("return_rate"),
-            "notes": it.get("notes")
-        })
-    if to_write:
-        upsert_user_positions_json(user_id, to_write)
-    return {"ok": True, "backfilled_days": len(day_map), "written": total_written, "recomputed": len(to_write)}
+    recomputed = 0
+    if recompute_total_earnings:
+        sums = sum_all_profit_by_code(user_id) or {}
+        cur_items = get_user_positions_json(user_id) or []
+        to_write = []
+        for it in cur_items:
+            code = str(it.get("code") or "").strip()
+            if not code:
+                continue
+            total = float(sums.get(code) or 0.0)
+            to_write.append({
+                "code": code,
+                "fund_name": it.get("fund_name"),
+                "amount": it.get("amount"),
+                "earnings_yesterday": it.get("earnings_yesterday"),
+                "total_earnings": total,
+                "return_rate": it.get("return_rate"),
+                "notes": it.get("notes")
+            })
+        if to_write:
+            upsert_user_positions_json(user_id, to_write)
+        recomputed = len(to_write)
+    return {"ok": True, "backfilled_days": len(day_map), "written": total_written, "recomputed": recomputed}
 def _seconds_until(target_h, target_m):
     now = datetime.datetime.now()
     target = now.replace(hour=target_h, minute=target_m, second=0, microsecond=0)
