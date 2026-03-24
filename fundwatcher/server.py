@@ -3177,15 +3177,25 @@ def settle_positions(time_slot="close", do_rollup=False):
             est = fetch_fund_estimation(code)
             pct = None
             navc = fetch_latest_nav_change(code)
-            if navc and navc.get("pct") is not None:
+            
+            # 只有当官方净值的日期是今天时才使用，避免周末/节假日重复累加前一个交易日的净值
+            if navc and navc.get("date") == date_str and navc.get("pct") is not None:
                 try:
                     pct = float(navc.get("pct"))
                 except Exception:
-                    pct = None
+                    pass
+            
             if pct is None:
-                if not est:
-                    continue
-                pct = float(est.get("gszzl") or 0) if est.get("gszzl") is not None else 0.0
+                # 回退到盘中估值，但也必须确保估值时间是今天的，否则说明今天非交易日
+                if est and est.get("gztime") and str(est.get("gztime")).startswith(date_str):
+                    try:
+                        pct = float(est.get("gszzl") or 0)
+                    except Exception:
+                        pass
+
+            # 如果今天既没有出官方净值，也没有当天的盘中估值，说明是非交易日，涨跌幅应为 0
+            if pct is None:
+                pct = 0.0
             total_prev = it.get("total_earnings")
             try:
                 total_prev = float(total_prev) if total_prev is not None else 0.0
